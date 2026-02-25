@@ -247,18 +247,14 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
 }
 
 // Graph building
-// Snake activation: x + sin^2(exp_a * x) * inv_b
-// x: [T, C], exp_a: [1, C], inv_b: [1, C] (pre-computed 1/exp(b))
+// Snake activation (fused): y = x + sin^2(a * x) * inv_b
+// x: [T, C], exp_a: [1, C], inv_b: [1, C] (pre-computed at load)
 static struct ggml_tensor * vae_snake(
         struct ggml_context * ctx,
         struct ggml_tensor * x,
         struct ggml_tensor * exp_a,
         struct ggml_tensor * inv_b) {
-    struct ggml_tensor * ax = ggml_mul(ctx, x, exp_a);      // [T, C] (broadcast 1->T)
-    struct ggml_tensor * s  = ggml_sin(ctx, ax);             // sin(e^a * x)
-    struct ggml_tensor * s2 = ggml_sqr(ctx, s);              // sin^2
-    struct ggml_tensor * d  = ggml_mul(ctx, s2, inv_b);      // * 1/e^b
-    return ggml_add(ctx, x, d);                              // x + ...
+    return ggml_snake(ctx, x, exp_a, inv_b);
 }
 
 // Conv1d + bias: data [T, IC] -> [T_out, OC]

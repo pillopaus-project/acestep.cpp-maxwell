@@ -208,11 +208,13 @@ Duration is determined by the source audio.
 
 **Repaint** (`--src-audio` + `repainting_start`/`repainting_end` in JSON):
 regenerates a time region of the source audio while preserving the rest.
+Requires the **SFT model** (the turbo model is less performant for this task).
 The DiT receives a binary mask: 1.0 inside the region (generate), 0.0 outside
 (keep original). Source latents outside the region provide context; silence
-fills the repaint zone. Both fields default to -1 (inactive). Set one or both
-to activate: -1 on start means 0s, -1 on end means source duration.
-`audio_cover_strength` is ignored in repaint mode (the mask handles everything).
+fills the repaint zone. Both fields default to -1
+(inactive). Set one or both to activate: -1 on start means 0s, -1 on end means
+source duration. `audio_cover_strength` is ignored in repaint mode (the mask
+handles everything).
 
 ```bash
 cat > /tmp/repaint.json << 'EOF'
@@ -220,7 +222,10 @@ cat > /tmp/repaint.json << 'EOF'
     "caption": "Smooth jazz guitar solo with reverb",
     "lyrics": "[Instrumental]",
     "repainting_start": 10.0,
-    "repainting_end": 25.0
+    "repainting_end": 25.0,
+    "inference_steps": 50,
+    "guidance_scale": 7.0,
+    "shift": 1.0
 }
 EOF
 
@@ -228,7 +233,7 @@ EOF
     --src-audio song.wav \
     --request /tmp/repaint.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-turbo-Q8_0.gguf \
+    --dit models/acestep-v15-sft-Q8_0.gguf \
     --vae models/vae-BF16.gguf
 ```
 

@@ -445,7 +445,7 @@ JSON controls how many steps use the source (default 0.5).
 
 GGML-native neural audio codec based on the Oobleck VAE encoder and decoder.
 Serves two purposes: validating the precision of the full VAE chain (encode +
-decode roundtrip), and compressing music at ~850 B/s with no perceptible
+decode roundtrip), and compressing music at 6.8 kbit/s with no perceptible
 difference from the original.
 
 ```

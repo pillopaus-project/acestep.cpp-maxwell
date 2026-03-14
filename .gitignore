@@ -1,9 +1,9 @@
-build/
+build*
 *.wav
 *.bf16
 
-tests/*/
+tests*
 
 checkpoints/
-models/
+models*/
 __pycache__/

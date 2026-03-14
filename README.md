@@ -238,7 +238,7 @@ cat > /tmp/repaint.json << 'EOF'
     "repainting_start": 10.0,
     "repainting_end": 25.0,
     "inference_steps": 50,
-    "guidance_scale": 7.0,
+    "guidance_scale": 1.0,
     "shift": 1.0
 }
 EOF
@@ -263,7 +263,7 @@ cat > /tmp/lego.json << 'EOF'
     "lyrics": "[Instrumental]",
     "lego": "guitar",
     "inference_steps": 50,
-    "guidance_scale": 7.0,
+    "guidance_scale": 1.0,
     "shift": 1.0
 }
 EOF
@@ -383,7 +383,7 @@ Valid names: `vocals`, `backing_vocals`, `drums`, `bass`, `guitar`,
 When set, passes the source audio to the DiT as context and builds the
 instruction `"Generate the {TRACK} track based on the audio context:"`.
 `audio_cover_strength` is forced to 1.0 (all steps see the source audio).
-Use `inference_steps=50`, `guidance_scale=7.0`, `shift=1.0` for base model.
+Use `inference_steps=50`, `guidance_scale=1.0`, `shift=1.0` for base model.
 
 ### LM sampling (ace-qwen3)
 

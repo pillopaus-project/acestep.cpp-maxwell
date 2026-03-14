@@ -23,7 +23,7 @@ MODE_CONFIG = {
     "sft": {
         "gguf_base": "acestep-v15-sft",
         "config_path": "acestep-v15-sft",
-        "steps": 50, "shift": 1.0, "guidance": 7.0,
+        "steps": 50, "shift": 1.0, "guidance": 1.0,
     },
 }
 
@@ -146,7 +146,7 @@ def run_python(dump_dir, req, cfg, lora_dir=None):
     from acestep.handler import AceStepHandler
 
     os.makedirs(dump_dir, exist_ok=True)
-    has_cfg = cfg["guidance"] > 0
+    has_cfg = cfg["guidance"] > 1.0
 
     caption  = req["caption"]
     lyrics   = req.get("lyrics", "")
@@ -319,7 +319,7 @@ def run_python(dump_dir, req, cfg, lora_dir=None):
 # comparison
 
 def build_stages(cfg):
-    has_cfg = cfg["guidance"] > 0
+    has_cfg = cfg["guidance"] > 1.0
     steps = cfg["steps"]
     stages = [
         "text_hidden", "lyric_embed", "enc_hidden", "detok_output", "context", "noise",
@@ -434,7 +434,7 @@ def run_mode(mode_name, cfg, req, gguf_path, lora_dir=None):
 
     tag = mode_name.upper() if mode_name == "sft" else mode_name.capitalize()
     cfg_str = f"steps={cfg['steps']}, shift={cfg['shift']}"
-    if cfg['guidance'] > 0:
+    if cfg['guidance'] > 1.0:
         cfg_str += f", CFG={cfg['guidance']}"
     print(f"[{tag}] {cfg_str} | {os.path.basename(gguf_path)}")
 

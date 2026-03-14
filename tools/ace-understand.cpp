@@ -583,6 +583,24 @@ int main(int argc, char ** argv) {
         out.timesignature  = parsed.timesignature;
         out.vocal_language = parsed.vocal_language;
         out.audio_codes    = codes_str;
+
+        // Set DiT defaults from model type (turbo vs SFT/base)
+        if (dit_gguf) {
+            GGUFModel gf = {};
+            if (gf_load(&gf, dit_gguf)) {
+                if (gf_get_bool(gf, "acestep.is_turbo")) {
+                    out.inference_steps = 8;
+                    out.shift           = 3.0f;
+                    out.guidance_scale  = 1.0f;
+                } else {
+                    out.inference_steps = 50;
+                    out.shift           = 1.0f;
+                    out.guidance_scale  = 1.0f;
+                }
+                gf_close(&gf);
+            }
+        }
+
         request_write(&out, output_path);
     }
 

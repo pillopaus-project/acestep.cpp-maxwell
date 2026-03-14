@@ -1,9 +1,11 @@
 build*
 *.wav
 *.bf16
-
+audio*
 tests*
+*.json
 
-checkpoints/
-models*/
+checkpoints*
+models*
+
 __pycache__/

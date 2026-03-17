@@ -1,4 +1,5 @@
-# acestep.cpp
+Nvidia Maxwell 4Gb vram compatible fork of :
+ # acestep.cpp
 
 Portable C++17 implementation of ACE-Step 1.5 music generation using GGML.
 Text + lyrics in, stereo 48kHz MP3 or WAV out. Runs on CPU, CUDA, ROCm, Metal, Vulkan.

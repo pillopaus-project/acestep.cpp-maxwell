@@ -25,7 +25,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     if(CUDAToolkit_FOUND AND CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
         set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real;120a-real;121a-real")
     else()
-        set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real")
+        set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real;50-real")
     endif()
 endif()
 

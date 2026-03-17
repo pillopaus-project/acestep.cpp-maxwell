@@ -18,22 +18,15 @@ fi
 
 input="$1"
 
-../build/ace-understand \
+build-cuda/ace-understand \
     --src-audio "$input" \
-    --dit ../models/acestep-v15-sft-Q8_0.gguf \
-    --vae ../models/vae-BF16.gguf \
-    --model ../models/acestep-5Hz-lm-4B-Q8_0.gguf \
-    -o ace-understand.json
+    --dit models/acestep-v15-sft-Q8_0.gguf \
+    --vae models/vae-BF16.gguf \
+    --model models/acestep-5Hz-lm-0.6B-Q8_0.gguf \
+    -o ace-understand-sft.json
 
-sed -i \
-    -e 's/"audio_cover_strength": *[0-9.]*/"audio_cover_strength": 0.04/' \
-    ace-understand.json
-
-../build/dit-vae \
-    --src-audio "$input" \
-    --request ace-understand.json \
-    --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit ../models/acestep-v15-sft-Q8_0.gguf \
-    --vae ../models/vae-BF16.gguf \
-    --batch 4 \
-    --wav
+build-cuda/dit-vae \
+    --request ace-understand-sft.json \
+    --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+    --dit models/acestep-v15-sft-Q8_0.gguf \
+    --vae models/vae-BF16.gguf \

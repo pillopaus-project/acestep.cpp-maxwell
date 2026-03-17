@@ -39,9 +39,9 @@ static void print_usage(const char * prog) {
             "Batch:\n"
             "  --batch <N>             DiT variations per request (default: 1, max 9)\n\n"
             "Output:\n"
-            "  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...\n"
-            "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
-            "  --wav                   Output WAV instead of MP3\n\n"
+            "  Default: WAV; MP3 default 320 kbps. input.json -> input0.mp3, input1.wav, ...\n"
+            "  --wav-bitrate <kbps>    MP3 bitrate (default: 320)\n"
+            "  --wav                   Output MP3 instead of WAV\n\n"
             "VAE tiling (memory control):\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
@@ -91,8 +91,8 @@ int main(int argc, char ** argv) {
     int                       batch_n        = 1;
     int                       vae_chunk      = 256;
     int                       vae_overlap    = 64;
-    bool                      output_wav     = false;  // default MP3, --wav forces WAV
-    int                       mp3_kbps       = 128;
+    bool                      output_wav     = true;  // default MP3, --wav forces WAV
+    int                       mp3_kbps       = 320;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--request") == 0) {
@@ -122,8 +122,8 @@ int main(int argc, char ** argv) {
             vae_chunk = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--vae-overlap") == 0 && i + 1 < argc) {
             vae_overlap = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--wav") == 0) {
-            output_wav = true;
+        } else if (strcmp(argv[i], "--mp3") == 0) {
+            output_wav = false;
         } else if (strcmp(argv[i], "--mp3-bitrate") == 0 && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -706,6 +706,9 @@ int main(int argc, char ** argv) {
 
         debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
 
+///////////////////////////////////////////////////////////////////////////
+    dit_ggml_free(&model);
+///////////////////////////////////////////////////////////////////////////
         // VAE Decode + Write WAVs
         if (have_vae) {
             int                T_latent    = T;

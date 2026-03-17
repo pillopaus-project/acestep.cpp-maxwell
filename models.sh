@@ -15,10 +15,10 @@ set -eu
 REPO="Serveurperso/ACE-Step-1.5-GGUF"
 DIR="models"
 QUANT="Q8_0"
-LM_SIZE="4B"
+LM_SIZE="0.6B"
 ALL=0
 SFT=0
-BASE=0
+BASE=1
 SHIFTS=0
 
 while [ $# -gt 0 ]; do
@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
         --quant)  QUANT="$2"; shift ;;
         --lm)     LM_SIZE="$2"; shift ;;
         --sft)    SFT=1 ;;
-        --base)   BASE=1 ;;
+        --no-base)   BASE=0 ;;
         --shifts) SHIFTS=1 ;;
         *)        echo "Unknown option: $1"; exit 1 ;;
     esac

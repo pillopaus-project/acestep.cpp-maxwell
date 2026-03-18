@@ -165,21 +165,7 @@ int main(int argc, char ** argv) {
     DiTGGMLConfig cfg;
     DiTGGML       model = {};
 
-    // Load DiT model (once for all requests)
-    dit_ggml_init_backend(&model);
-    if (!use_fa) {
-        model.use_flash_attn = false;
-    }
-    fprintf(stderr, "[Load] Backend init: %.1f ms\n", timer.ms());
-
-    timer.reset();
-    if (!dit_ggml_load(&model, dit_gguf, cfg, lora_path, lora_scale)) {
-        fprintf(stderr, "[DiT] FATAL: failed to load model\n");
-        return 1;
-    }
-    fprintf(stderr, "[Load] DiT weight load: %.1f ms\n", timer.ms());
-
-    // Read DiT GGUF metadata + silence_latent tensor (once)
+    // Read DiT GGUF metadata + silence_latent tensor (once, without loading weights yet)
     bool               is_turbo = false;
     std::vector<float> silence_full;  // [15000, 64] f32
     {
@@ -207,16 +193,6 @@ int main(int argc, char ** argv) {
 
     int Oc     = cfg.out_channels;      // 64
     int ctx_ch = cfg.in_channels - Oc;  // 128
-
-    // Load VAE model (once for all requests)
-    VAEGGML vae      = {};
-    bool    have_vae = false;
-    if (vae_gguf) {
-        timer.reset();
-        vae_ggml_load(&vae, vae_gguf);
-        fprintf(stderr, "[Load] VAE weights: %.1f ms\n", timer.ms());
-        have_vae = true;
-    }
 
     // Cover mode: load VAE encoder and encode source audio
     VAEEncoder         vae_enc    = {};
@@ -261,7 +237,32 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Cover] Encoded: T_cover=%d (%.2fs), %.1f ms\n", T_cover, (float) T_cover * 1920.0f / 48000.0f,
                 timer.ms());
         have_cover = true;
+        vae_enc_free(&vae_enc);  // Free encoder immediately after encoding to save VRAM
     }
+
+    // Load VAE model (once for all requests, after cover encoding)
+    VAEGGML vae      = {};
+    bool    have_vae = false;
+    if (vae_gguf) {
+        timer.reset();
+        vae_ggml_load(&vae, vae_gguf);
+        fprintf(stderr, "[Load] VAE weights: %.1f ms\n", timer.ms());
+        have_vae = true;
+    }
+
+    // Load DiT model (after cover encoding and VAE decoder loading to save VRAM)
+    dit_ggml_init_backend(&model);
+    if (!use_fa) {
+        model.use_flash_attn = false;
+    }
+    fprintf(stderr, "[Load] Backend init: %.1f ms\n", timer.ms());
+
+    timer.reset();
+    if (!dit_ggml_load(&model, dit_gguf, cfg, lora_path, lora_scale)) {
+        fprintf(stderr, "[DiT] FATAL: failed to load model\n");
+        return 1;
+    }
+    fprintf(stderr, "[Load] DiT weight load: %.1f ms\n", timer.ms());
 
     // Process each request
     for (int ri = 0; ri < (int) request_paths.size(); ri++) {
@@ -706,9 +707,9 @@ int main(int argc, char ** argv) {
 
         debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
 
-        ///////////////////////////////////////////////////////////////////////////
+        // Free DiT model to save VRAM before VAE decoding
         dit_ggml_free(&model);
-        ///////////////////////////////////////////////////////////////////////////
+
         // VAE Decode + Write WAVs
         if (have_vae) {
             int                T_latent    = T;
@@ -761,6 +762,20 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // Reload DiT model for next request if any
+        if (ri + 1 < (int) request_paths.size()) {
+            timer.reset();
+            dit_ggml_init_backend(&model);
+            if (!use_fa) {
+                model.use_flash_attn = false;
+            }
+            if (!dit_ggml_load(&model, dit_gguf, cfg, lora_path, lora_scale)) {
+                fprintf(stderr, "[DiT] FATAL: failed to reload model for next request\n");
+                return 1;
+            }
+            fprintf(stderr, "[Load] DiT reload: %.1f ms\n", timer.ms());
+        }
+
         fprintf(stderr, "[Request %d/%d] Done\n", ri + 1, (int) request_paths.size());
     }
 
@@ -770,7 +785,6 @@ int main(int argc, char ** argv) {
     if (have_vae) {
         vae_ggml_free(&vae);
     }
-    dit_ggml_free(&model);
     fprintf(stderr, "[Pipeline] All done\n");
     return 0;
 }

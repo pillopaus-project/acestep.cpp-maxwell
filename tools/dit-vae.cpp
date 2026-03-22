@@ -32,7 +32,9 @@ static void print_usage(const char * prog) {
             "  --dit <gguf>            DiT GGUF file\n"
             "  --vae <gguf>            VAE GGUF file\n\n"
             "Reference audio:\n"
-            "  --src-audio <file>      Source audio (WAV or MP3, any sample rate)\n\n"
+            "  --src-audio <file>      Source audio (WAV or MP3, any sample rate)\n"
+            "  --remix                 Remix mode: partially use existing audio codes \n\n   "
+            "  --remix-strength <float>     Remix strength (0.0-1.0, default: 0.5, only with --remix)\n\n"
             "LoRA:\n"
             "  --lora <path>           LoRA safetensors file or directory\n"
             "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
@@ -40,8 +42,8 @@ static void print_usage(const char * prog) {
             "  --batch <N>             DiT variations per request (default: 1, max 9)\n\n"
             "Output:\n"
             "  Default: WAV; MP3 default 320 kbps. input.json -> input0.mp3, input1.wav, ...\n"
-            "  --wav-bitrate <kbps>    MP3 bitrate (default: 320)\n"
-            "  --wav                   Output MP3 instead of WAV\n\n"
+            "  --mp3-bitrate <kbps>    MP3 bitrate (default: 320)\n"
+            "  --mp3                   Output MP3 instead of WAV\n\n"
             "VAE tiling (memory control):\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
@@ -91,8 +93,10 @@ int main(int argc, char ** argv) {
     int                       batch_n        = 1;
     int                       vae_chunk      = 256;
     int                       vae_overlap    = 64;
-    bool                      output_wav     = true;  // default MP3, --wav forces WAV
+    bool                      output_wav     = true;  // default WAV, --mp3 switches to MP3
     int                       mp3_kbps       = 320;
+    bool                      is_remix       = false;
+    float                     remix_strength = 0.5f;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--request") == 0) {
@@ -124,6 +128,10 @@ int main(int argc, char ** argv) {
             vae_overlap = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--mp3") == 0) {
             output_wav = false;
+        } else if (strcmp(argv[i], "--remix") == 0) {
+            is_remix = true;
+        } else if (strcmp(argv[i], "--remix-strength") == 0 && i + 1 < argc) {
+            remix_strength = (float) atof(argv[++i]);
         } else if (strcmp(argv[i], "--mp3-bitrate") == 0 && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -357,8 +365,11 @@ int main(int argc, char ** argv) {
 
         // Audio codes from request JSON (passthrough mode only, NOT cover)
         std::vector<int> codes_vec = parse_codes_string(req.audio_codes);
-        if (!codes_vec.empty()) {
+        if (!codes_vec.empty() && !is_remix) {
             fprintf(stderr, "[Pipeline] %zu audio codes (%.1fs @ 5Hz)\n", codes_vec.size(),
+                    (float) codes_vec.size() / 5.0f);
+        } else if (!codes_vec.empty() && is_remix) {
+            fprintf(stderr, "[Pipeline] REMIX mode -%zu audio codes (%.1fs @ 5Hz)\n", codes_vec.size(),
                     (float) codes_vec.size() / 5.0f);
         }
 
@@ -386,8 +397,8 @@ int main(int argc, char ** argv) {
         int enc_S = 0;
 
         fprintf(stderr, "[Pipeline] T=%d, S=%d\n", T, S);
-        fprintf(stderr, "[Pipeline] seed=%lld, steps=%d, guidance=%.1f, shift=%.1f, duration=%.1fs\n", seed, num_steps,
-                guidance_scale, shift, duration);
+        fprintf(stderr, "[Pipeline] seed=%lld, steps=%d, guidance=%.1f, shift=%.1f, duration=%.1fs, remix mode:%i \n",
+                seed, num_steps, guidance_scale, shift, duration, is_remix);
 
         if (T > 15000) {
             fprintf(stderr, "[Pipeline] ERROR: T=%d exceeds silence_latent max 15000, skipping\n", T);
@@ -461,7 +472,7 @@ int main(int argc, char ** argv) {
             instruction_str = "Generate the " + track_upper + " track based on the audio context:";
         } else if (is_repaint) {
             instruction_str = "Repaint the mask area based on the given conditions:";
-        } else if (is_cover) {
+        } else if (is_cover || is_remix) {
             instruction_str = "Generate audio semantic tokens based on the given conditions:";
         } else {
             instruction_str = "Fill the audio semantic mask based on the given conditions:";
@@ -541,7 +552,19 @@ int main(int argc, char ** argv) {
                 memcpy(timbre_feats.data() + (size_t) copy_n * 64, silence_full.data() + (size_t) copy_n * 64,
                        (size_t) (S_ref - copy_n) * 64 * sizeof(float));
             }
-            fprintf(stderr, "[Timbre] Using source latents (%d frames, %.1fs)\n", copy_n, (float) copy_n / 25.0f);
+            fprintf(stderr, "[Timbre] Using source latents (%d frames, %.1fs) \n", copy_n, (float) copy_n / 25.0f);
+        } else if (is_remix) {
+            int copy_n = T < S_ref ? T : S_ref;
+            // Convert codes_vec (int) to float representation for timbre_feats
+            for (int i = 0; i < copy_n * 64 && i / 64 < (int) codes_vec.size(); ++i) {
+                timbre_feats[i] = static_cast<float>(codes_vec[i / 64]);
+            }
+            if (copy_n < S_ref) {
+                memcpy(timbre_feats.data() + (size_t) copy_n * 64, silence_full.data() + (size_t) copy_n * 64,
+                       (size_t) (S_ref - copy_n) * 64 * sizeof(float));
+            }
+            fprintf(stderr, "[Timbre] REMIX mode - using %zu audio codes for %.1fs \n", codes_vec.size(),
+                    (float) codes_vec.size() / 5.0f);
         } else {
             memcpy(timbre_feats.data(), silence_full.data(), S_ref * 64 * sizeof(float));
         }
@@ -560,7 +583,7 @@ int main(int argc, char ** argv) {
         // Decode audio codes if provided (passthrough mode only, NOT cover)
         int                decoded_T = 0;
         std::vector<float> decoded_latents;
-        if (!have_cover && !codes_vec.empty()) {
+        if (!have_cover && !codes_vec.empty()) {  // && !is_remix) {
             timer.reset();
             DetokGGML detok = {};
             if (!detok_ggml_load(&detok, dit_gguf, model.backend, model.cpu_backend)) {
@@ -618,19 +641,30 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[Repaint] latent frames: [%d, %d) / %d\n", repaint_t0, repaint_t1, T);
         }
         std::vector<float> context_single(T * ctx_ch);
-        if (have_cover) {
+        if (have_cover && !is_remix) { 
             for (int t = 0; t < T; t++) {
                 bool          in_region = is_repaint && t >= repaint_t0 && t < repaint_t1;
                 // src: silence in repaint region, cover_latents outside
-                const float * src       = in_region ?
-                                              silence_full.data() + t * Oc :
-                                              ((t < T_cover) ? cover_latents.data() + t * Oc : silence_full.data() + t * Oc);
-                float         mask_val  = is_repaint ? (in_region ? 1.0f : 0.0f) : 1.0f;
+                const float * src = in_region ?
+                                        silence_full.data() + t * Oc :
+                                        ((t < T_cover) ? cover_latents.data() + t * Oc : silence_full.data() + t * Oc);
+                float         mask_val = is_repaint ? (in_region ? 1.0f : 0.0f) : 1.0f;
                 for (int c = 0; c < Oc; c++) {
                     context_single[t * ctx_ch + c] = src[c];
                 }
                 for (int c = 0; c < Oc; c++) {
                     context_single[t * ctx_ch + Oc + c] = mask_val;
+                }
+            }
+        } else if (is_remix) {
+            for (int t = 0; t < T; t++) {
+                const float * src =
+                    (t < decoded_T) ? decoded_latents.data() + t * Oc : silence_full.data() + (t - decoded_T) * Oc;
+                for (int c = 0; c < Oc; c++) {
+                    context_single[t * ctx_ch + c] = src[c];
+                }
+                for (int c = 0; c < Oc; c++) {
+                    context_single[t * ctx_ch + Oc + c] = 1.0f;
                 }
             }
         } else {
@@ -657,7 +691,8 @@ int main(int argc, char ** argv) {
         // Repaint mode: mask handles region selection, no context switching needed
         std::vector<float> context_silence;
         int                cover_steps = -1;
-        if (have_cover && !is_repaint) {
+        int               remix_steps = -1;
+        if ((have_cover && !is_remix)  && !is_repaint) {
             float cover_strength = req.audio_cover_strength;
             if (cover_strength < 1.0f) {
                 // Build silence context: all frames use silence_latent
@@ -676,11 +711,34 @@ int main(int argc, char ** argv) {
                     memcpy(context_silence.data() + b * T * ctx_ch, silence_single.data(), T * ctx_ch * sizeof(float));
                 }
                 cover_steps = (int) ((float) num_steps * cover_strength);
-                fprintf(stderr, "[Cover] audio_cover_strength=%.2f -> switch at step %d/%d\n", cover_strength,
-                        cover_steps, num_steps);
+                fprintf(stderr, "[Cover] audio_cover_strength=%.2f -> switch at step %d/%d \n",
+                        cover_strength, cover_steps, num_steps);
             }
         }
-
+                /////////////////   || is_remix)
+        if ( is_remix) {
+            if (remix_strength < 1.0f) {
+                // Build silence context: all frames use silence_latent
+                std::vector<float> silence_single(T * ctx_ch);
+                for (int t = 0; t < T; t++) {
+                    const float * src = silence_full.data() + t * Oc;
+                    for (int c = 0; c < Oc; c++) {
+                        silence_single[t * ctx_ch + c] = src[c];
+                    }
+                    for (int c = 0; c < Oc; c++) {
+                        silence_single[t * ctx_ch + Oc + c] = 1.0f;
+                    }
+                }
+                context_silence.resize(batch_n * T * ctx_ch);
+                for (int b = 0; b < batch_n; b++) {
+                    memcpy(context_silence.data() + b * T * ctx_ch, silence_single.data(), T * ctx_ch * sizeof(float));
+                }
+                remix_steps = (int) ((float) num_steps * remix_strength);
+                fprintf(stderr, "[Remix] audio_remix_strength=%.2f -> switch at step %d/%d \n",
+                        remix_strength, remix_steps, num_steps);
+            }
+        }
+                /////////////////////////// end 
         // Generate N noise samples (Philox4x32-10, matches torch.randn on CUDA with bf16)
         std::vector<float> noise(batch_n * Oc * T);
         for (int b = 0; b < batch_n; b++) {
@@ -695,18 +753,29 @@ int main(int argc, char ** argv) {
         // Debug dumps (sample 0)
         debug_dump_2d(&dbg, "noise", noise.data(), T, Oc);
         debug_dump_2d(&dbg, "context", context.data(), T, ctx_ch);
+    ///////////////////////////////
+        if (is_cover && !is_remix) {
+            fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n", T, S, enc_S, num_steps,
+                    batch_n, have_cover ? " (cover)" : "");
+            timer.reset();
+            dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n, num_steps,
+                              schedule.data(), output.data(), guidance_scale, &dbg,
+                              context_silence.empty() ? nullptr : context_silence.data(), cover_steps);
+            fprintf(stderr, "[DiT] Total generation: %.1f ms (%.1f ms/sample)\n", timer.ms(), timer.ms() / batch_n);
 
-        fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n", T, S, enc_S, num_steps, batch_n,
-                have_cover ? " (cover)" : "");
+            debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
+        } else if (is_remix) {
+            fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n", T, S, enc_S, num_steps,
+                    batch_n, is_remix ? " (remix)" : "");
+            timer.reset();
+            dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n, num_steps,
+                              schedule.data(), output.data(), guidance_scale, &dbg,
+                              context_silence.empty() ? nullptr : context_silence.data(), remix_steps);
+            fprintf(stderr, "[DiT] Total generation: %.1f ms (%.1f ms/sample)\n", timer.ms(), timer.ms() / batch_n);
 
-        timer.reset();
-        dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n, num_steps,
-                          schedule.data(), output.data(), guidance_scale, &dbg,
-                          context_silence.empty() ? nullptr : context_silence.data(), cover_steps);
-        fprintf(stderr, "[DiT] Total generation: %.1f ms (%.1f ms/sample)\n", timer.ms(), timer.ms() / batch_n);
-
-        debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
-
+            debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
+        }
+        
         // Free DiT model to save VRAM before VAE decoding
         dit_ggml_free(&model);
 

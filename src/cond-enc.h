@@ -83,7 +83,7 @@ static void cond_ggml_init_backend(CondGGML * m) {
     m->use_flash_attn = true;
     // Sub-Ampere tensor cores accumulate in FP16 (max 65504).
     // Deep encoders can overflow to inf, causing NaN in rms_norm.
-    m->clamp_fp16     = (bp.gpu_cc > 0 && bp.gpu_cc < 800);
+    m->clamp_fp16     = (bp.gpu_cc > 0 && (bp.gpu_cc < 800 && bp.gpu_cc != 500));
     if (m->clamp_fp16) {
         fprintf(stderr, "[CondEncoder] FP16 clamp enabled (cc=%d)\n", bp.gpu_cc);
     }

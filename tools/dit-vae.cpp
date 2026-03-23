@@ -23,6 +23,10 @@
 #include <random>
 #include <vector>
 
+bool remix_mode = false;  ////
+
+
+
 static void print_usage(const char * prog) {
     fprintf(stderr,
             "Usage: %s --request <json...> --text-encoder <gguf> --dit <gguf> --vae <gguf> [options]\n\n"
@@ -33,8 +37,8 @@ static void print_usage(const char * prog) {
             "  --vae <gguf>            VAE GGUF file\n\n"
             "Reference audio:\n"
             "  --src-audio <file>      Source audio (WAV or MP3, any sample rate)\n"
-            "  --remix                 Remix mode: partially use existing audio codes \n\n   "
-            "  --remix-strength <float>     Remix strength (0.0-1.0, default: 0.5, only with --remix)\n\n"
+            "  --remix                 Remix mode: partially use existing audio codes \n\n"
+            "  --remix-str <float>     Remix strength (0.0-1.0, default: 0.5, only with --remix)\n\n"
             "LoRA:\n"
             "  --lora <path>           LoRA safetensors file or directory\n"
             "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
@@ -96,7 +100,8 @@ int main(int argc, char ** argv) {
     bool                      output_wav     = true;  // default WAV, --mp3 switches to MP3
     int                       mp3_kbps       = 320;
     bool                      is_remix       = false;
-    float                     remix_strength = 0.5f;
+    float                     remix_str = 0.5f;
+    
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--request") == 0) {
@@ -130,8 +135,8 @@ int main(int argc, char ** argv) {
             output_wav = false;
         } else if (strcmp(argv[i], "--remix") == 0) {
             is_remix = true;
-        } else if (strcmp(argv[i], "--remix-strength") == 0 && i + 1 < argc) {
-            remix_strength = (float) atof(argv[++i]);
+        } else if (strcmp(argv[i], "--remix-str") == 0 && i + 1 < argc) {
+            remix_str = (float) atof(argv[++i]);
         } else if (strcmp(argv[i], "--mp3-bitrate") == 0 && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -201,6 +206,7 @@ int main(int argc, char ** argv) {
 
     int Oc     = cfg.out_channels;      // 64
     int ctx_ch = cfg.in_channels - Oc;  // 128
+
 
     // Cover mode: load VAE encoder and encode source audio
     VAEEncoder         vae_enc    = {};
@@ -371,6 +377,7 @@ int main(int argc, char ** argv) {
         } else if (!codes_vec.empty() && is_remix) {
             fprintf(stderr, "[Pipeline] REMIX mode -%zu audio codes (%.1fs @ 5Hz)\n", codes_vec.size(),
                     (float) codes_vec.size() / 5.0f);
+            remix_mode = true;  ////
         }
 
         // Build schedule: t_i = shift * t / (1 + (shift-1)*t) where t = 1 - i/steps
@@ -387,7 +394,7 @@ int main(int argc, char ** argv) {
             T        = T_cover;
             // duration in metas must match actual source length, not JSON default
             duration = (float) T_cover / (float) FRAMES_PER_SECOND;
-        } else if (!codes_vec.empty()) {
+        } else if (!codes_vec.empty()||remix_mode) {
             T = (int) codes_vec.size() * 5;
         } else {
             T = (int) (duration * FRAMES_PER_SECOND);
@@ -397,8 +404,8 @@ int main(int argc, char ** argv) {
         int enc_S = 0;
 
         fprintf(stderr, "[Pipeline] T=%d, S=%d\n", T, S);
-        fprintf(stderr, "[Pipeline] seed=%lld, steps=%d, guidance=%.1f, shift=%.1f, duration=%.1fs, remix mode:%i \n",
-                seed, num_steps, guidance_scale, shift, duration, is_remix);
+        fprintf(stderr, "[Pipeline] seed=%lld, steps=%d, guidance=%.1f, shift=%.1f, duration=%.1fs, remix mode:%i, is_remix:%i \n",
+                seed, num_steps, guidance_scale, shift, duration, remix_mode, is_remix);
 
         if (T > 15000) {
             fprintf(stderr, "[Pipeline] ERROR: T=%d exceeds silence_latent max 15000, skipping\n", T);
@@ -692,6 +699,31 @@ int main(int argc, char ** argv) {
         std::vector<float> context_silence;
         int                cover_steps = -1;
         int               remix_steps = -1;
+
+                /////////////////   || is_remix)
+        if ( is_remix) {
+            if (remix_str < 1.0f) {
+                // Build silence context: all frames use silence_latent
+                std::vector<float> silence_single(T * ctx_ch);
+                for (int t = 0; t < T; t++) {
+                    const float * src = silence_full.data() + t * Oc;
+                    for (int c = 0; c < Oc; c++) {
+                        silence_single[t * ctx_ch + c] = src[c];
+                    }
+                    for (int c = 0; c < Oc; c++) {
+                        silence_single[t * ctx_ch + Oc + c] = 1.0f;
+                    }
+                }
+                context_silence.resize(batch_n * T * ctx_ch);
+                for (int b = 0; b < batch_n; b++) {
+                    memcpy(context_silence.data() + b * T * ctx_ch, silence_single.data(), T * ctx_ch * sizeof(float));
+                }
+                remix_steps = (int) ((float) num_steps * remix_str);
+                fprintf(stderr, "[Remix] audio_remix_strength=%.2f -> switch at step %d/%d \n",
+                        remix_str, remix_steps, num_steps);
+            }
+        }
+
         if ((have_cover && !is_remix)  && !is_repaint) {
             float cover_strength = req.audio_cover_strength;
             if (cover_strength < 1.0f) {
@@ -715,29 +747,7 @@ int main(int argc, char ** argv) {
                         cover_strength, cover_steps, num_steps);
             }
         }
-                /////////////////   || is_remix)
-        if ( is_remix) {
-            if (remix_strength < 1.0f) {
-                // Build silence context: all frames use silence_latent
-                std::vector<float> silence_single(T * ctx_ch);
-                for (int t = 0; t < T; t++) {
-                    const float * src = silence_full.data() + t * Oc;
-                    for (int c = 0; c < Oc; c++) {
-                        silence_single[t * ctx_ch + c] = src[c];
-                    }
-                    for (int c = 0; c < Oc; c++) {
-                        silence_single[t * ctx_ch + Oc + c] = 1.0f;
-                    }
-                }
-                context_silence.resize(batch_n * T * ctx_ch);
-                for (int b = 0; b < batch_n; b++) {
-                    memcpy(context_silence.data() + b * T * ctx_ch, silence_single.data(), T * ctx_ch * sizeof(float));
-                }
-                remix_steps = (int) ((float) num_steps * remix_strength);
-                fprintf(stderr, "[Remix] audio_remix_strength=%.2f -> switch at step %d/%d \n",
-                        remix_strength, remix_steps, num_steps);
-            }
-        }
+
                 /////////////////////////// end 
         // Generate N noise samples (Philox4x32-10, matches torch.randn on CUDA with bf16)
         std::vector<float> noise(batch_n * Oc * T);
@@ -755,23 +765,23 @@ int main(int argc, char ** argv) {
         debug_dump_2d(&dbg, "context", context.data(), T, ctx_ch);
     ///////////////////////////////
         if (is_cover && !is_remix) {
-            fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n", T, S, enc_S, num_steps,
-                    batch_n, have_cover ? " (cover)" : "");
+            fprintf(stderr, "[DiT-Cover] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n", T, S, enc_S, num_steps,
+                    batch_n, have_cover ? " (cover mode)" : "");
             timer.reset();
             dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n, num_steps,
                               schedule.data(), output.data(), guidance_scale, &dbg,
                               context_silence.empty() ? nullptr : context_silence.data(), cover_steps);
-            fprintf(stderr, "[DiT] Total generation: %.1f ms (%.1f ms/sample)\n", timer.ms(), timer.ms() / batch_n);
+            fprintf(stderr, "[DiT] Cover - Total generation: %.1f ms (%.1f ms/sample)\n", timer.ms(), timer.ms() / batch_n);
 
             debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
         } else if (is_remix) {
-            fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n", T, S, enc_S, num_steps,
-                    batch_n, is_remix ? " (remix)" : "");
+            fprintf(stderr, "[DiT-Remix] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d %s\n", T, S, enc_S, num_steps,
+                    batch_n, is_remix ? "(remix mode)" : "");
             timer.reset();
             dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n, num_steps,
                               schedule.data(), output.data(), guidance_scale, &dbg,
                               context_silence.empty() ? nullptr : context_silence.data(), remix_steps);
-            fprintf(stderr, "[DiT] Total generation: %.1f ms (%.1f ms/sample)\n", timer.ms(), timer.ms() / batch_n);
+            fprintf(stderr, "[DiT] Remix - Total generation: %.1f ms \n", timer.ms());
 
             debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
         }
@@ -797,7 +807,7 @@ int main(int argc, char ** argv) {
                 }
                 fprintf(stderr, "[VAE Batch%d] Decode: %.1f ms\n", b, timer.ms());
 
-                // Peak normalization to -1.0 dB
+                // Peak normalization to -2.0 dB
                 {
                     float peak      = 0.0f;
                     int   n_samples = 2 * T_audio;
@@ -808,7 +818,7 @@ int main(int argc, char ** argv) {
                         }
                     }
                     if (peak > 1e-6f) {
-                        const float target_amp = powf(10.0f, -1.0f / 20.0f);
+                        const float target_amp = powf(10.0f, -2.0f / 20.0f);
                         float       gain       = target_amp / peak;
                         for (int i = 0; i < n_samples; i++) {
                             audio[i] *= gain;

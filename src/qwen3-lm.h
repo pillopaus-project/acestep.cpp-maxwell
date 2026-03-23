@@ -160,7 +160,7 @@ static void qw3lm_init_backend(Qwen3LM * m) {
     m->cpu_backend    = bp.cpu_backend;
     m->sched          = backend_sched_new(bp, 8192);
     m->use_flash_attn = true;
-    m->clamp_fp16     = (bp.gpu_cc > 0 && bp.gpu_cc < 800);
+    m->clamp_fp16     = (bp.gpu_cc > 0 && (bp.gpu_cc < 800 && bp.gpu_cc != 500));
     if (m->clamp_fp16) {
         fprintf(stderr, "[LM] FP16 clamp enabled (cc=%d)\n", bp.gpu_cc);
     }

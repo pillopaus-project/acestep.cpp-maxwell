@@ -4,8 +4,8 @@ Portable C++17 implementation of ACE-Step 1.5 music generation using GGML.
 Text + lyrics in, stereo 48kHz MP3 or WAV out. Runs on CPU, CUDA, ROCm, Metal, Vulkan.
 
 ## Fork Status 
-dit-vae : generation working, cover mode working, new remix mode works like cover mode (0.1 to 1.0 range) but on codes present in json file; wav default output type, 320kbps default bit-rate for MP3.
-
+dit-vae : generation working, cover mode working, wav default output type, 320kbps default bit-rate for MP3.
+New feat :  --remix mode : works like cover mode (0.1 to 1.0 range) but on codes present in json file (from LM or ace-understand).
 
 ## Build
 

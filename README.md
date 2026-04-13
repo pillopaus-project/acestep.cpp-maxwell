@@ -1,3 +1,4 @@
+Nvidia MaxWell $gb Vram fork of :
 # acestep.cpp
 
 Local AI music generation server with browser UI, powered by GGML.

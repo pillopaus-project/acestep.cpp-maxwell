@@ -264,6 +264,8 @@ void ops_encode_timbre(AceSynth * ctx, const float * ref_audio, int ref_len, Syn
 
 // ops_encode_text
 int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
+    ace_textenc_load(ctx);  // ensure text encoder is loaded before timing
+     ace_condenc_load(ctx); ////////////  PPFIX ////////////
     // 3. Per-batch text encoding.
     // Each batch element gets its own caption, lyrics, and metadata encoded independently.
     // TextEncoder + CondEncoder run in series (cheap: ~13ms per element).
@@ -429,7 +431,8 @@ int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthS
     if (batch_n > 1) {
         fprintf(stderr, "[Encode-Text] Per-batch encoding done: max_enc_S=%d\n", s.max_enc_S);
     }
-
+    ace_condenc_free(ctx); ////////////  PPFIX ////////////
+     ace_textenc_free(ctx);
     return 0;
 }
 

@@ -581,7 +581,7 @@ void ace_condenc_free(AceSynth * ctx) {
 ////////////////////////////   Reloads   //////////////////////
 void ace_dit_reload(AceSynth * ctx) {
     dit_ggml_init_backend(&ctx->dit);
-    if (use_fa) {
+    if (!use_fa) {
         ctx->dit.use_flash_attn = false;
     }
     fprintf(stderr, "[RELOAD] Backend init\n");
@@ -670,11 +670,6 @@ int ace_bpe_load(AceSynth * ctx) {
     }
         if (!load_bpe_from_gguf(&ctx->bpe, text_encoder_path)) {
         fprintf(stderr, "[Synth-Load] FATAL: BPE load failed from %s\n", text_encoder_path);
-        dit_ggml_free(&ctx->dit);
-        if (ctx->have_vae) {
-            vae_ggml_free(&ctx->vae);
-        }
-        delete ctx;
         return -1;
     }
     fprintf(stderr, "[Synth-Load] BPE tokenizer: %.1f ms\n", timer.ms());
@@ -694,11 +689,6 @@ int ace_textenc_load(AceSynth * ctx) {
     }
     if (!qwen3_load_text_encoder(&ctx->text_enc, text_encoder_path)) {
         fprintf(stderr, "[Synth-Load] FATAL: TextEncoder load failed\n");
-        dit_ggml_free(&ctx->dit);
-        if (ctx->have_vae) {
-            vae_ggml_free(&ctx->vae);
-        }
-        delete ctx;
         return -1;
     }
     fprintf(stderr, "[Synth-Load] TextEncoder: %.1f ms\n", timer.ms());
@@ -713,18 +703,12 @@ int ace_condenc_load(AceSynth * ctx) {
     timer.reset();
     ctx->cond_enc = {};
     cond_ggml_init_backend(&ctx->cond_enc);
-    if (use_fa) {
+    if (!use_fa) {
         ctx->cond_enc.use_flash_attn = false;
     }
     ctx->cond_enc.clamp_fp16 = clamp_fp16;
     if (!cond_ggml_load(&ctx->cond_enc, dit_path)) {
         fprintf(stderr, "[Synth-Load] FATAL: CondEncoder load failed\n");
-        qwen3_free(&ctx->text_enc);
-        dit_ggml_free(&ctx->dit);
-        if (ctx->have_vae) {
-            vae_ggml_free(&ctx->vae);
-        }
-        delete ctx;
         return -1;
     }
     fprintf(stderr, "[Synth-Load] ConditionEncoder: %.1f ms\n", timer.ms());

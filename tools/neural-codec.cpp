@@ -28,6 +28,7 @@
 #include "audio-io.h"
 #include "vae-enc.h"
 #include "vae.h"
+#include "version.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -170,13 +171,19 @@ static float * read_latent(const char * path, int * T_latent) {
     // Check magic
     char magic[4] = {};
     if (fsize >= 8) {
-        fread(magic, 1, 4, f);
+        if (fread(magic, 1, 4, f) != 4) {
+            fclose(f);
+            return NULL;
+        }
     }
 
     if (memcmp(magic, NAC8_MAGIC, 4) == 0) {
         // Q8 format
         uint32_t t;
-        fread(&t, 4, 1, f);
+        if (fread(&t, 4, 1, f) != 1) {
+            fclose(f);
+            return NULL;
+        }
         *T_latent = (int) t;
 
         long expected = NAC8_HEADER + (long) t * NAC8_FRAME;
@@ -189,11 +196,19 @@ static float * read_latent(const char * path, int * T_latent) {
         float * data = (float *) malloc((size_t) t * 64 * sizeof(float));
         for (int i = 0; i < (int) t; i++) {
             ggml_fp16_t scale_f16;
-            fread(&scale_f16, 2, 1, f);
+            if (fread(&scale_f16, 2, 1, f) != 1) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
             float scale = ggml_fp16_to_fp32(scale_f16);
 
             int8_t q[64];
-            fread(q, 1, 64, f);
+            if (fread(q, 1, 64, f) != 64) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
 
             float * frame = data + i * 64;
             for (int j = 0; j < 64; j++) {
@@ -212,7 +227,10 @@ static float * read_latent(const char * path, int * T_latent) {
     if (memcmp(magic, NAC4_MAGIC, 4) == 0) {
         // Q4 format
         uint32_t t;
-        fread(&t, 4, 1, f);
+        if (fread(&t, 4, 1, f) != 1) {
+            fclose(f);
+            return NULL;
+        }
         *T_latent = (int) t;
 
         long expected = NAC4_HEADER + (long) t * NAC4_FRAME;
@@ -225,11 +243,19 @@ static float * read_latent(const char * path, int * T_latent) {
         float * data = (float *) malloc((size_t) t * 64 * sizeof(float));
         for (int i = 0; i < (int) t; i++) {
             ggml_fp16_t scale_f16;
-            fread(&scale_f16, 2, 1, f);
+            if (fread(&scale_f16, 2, 1, f) != 1) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
             float scale = ggml_fp16_to_fp32(scale_f16);
 
             uint8_t packed[32];
-            fread(packed, 1, 32, f);
+            if (fread(packed, 1, 32, f) != 32) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
 
             // unpack signed nibbles
             float * frame = data + i * 64;
@@ -265,7 +291,11 @@ static float * read_latent(const char * path, int * T_latent) {
 
     *T_latent    = (int) (fsize / (64 * sizeof(float)));
     float * data = (float *) malloc(fsize);
-    fread(data, 1, fsize, f);
+    if (fread(data, 1, fsize, f) != (size_t) fsize) {
+        fclose(f);
+        free(data);
+        return NULL;
+    }
     fclose(f);
 
     float duration = (float) (*T_latent) * 1920.0f / 48000.0f;
@@ -275,6 +305,7 @@ static float * read_latent(const char * path, int * T_latent) {
 }
 
 static void print_usage(const char * prog) {
+    fprintf(stderr, "acestep.cpp %s\n\n", ACE_VERSION);
     fprintf(stderr,
             "Usage: %s --vae <gguf> --encode|--decode -i <input> [-o <output>] [--q8|--q4]\n\n"
             "Required:\n"
@@ -287,7 +318,7 @@ static void print_usage(const char * prog) {
             "  --q4                    Quantize latent to int4 (~6.8 kbit/s)\n\n"
             "Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
             "               song.latent -> song.wav\n\n"
-            "VAE tiling (memory control):\n"
+            "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
             "Latent formats (decode auto-detects):\n"
@@ -390,12 +421,7 @@ int main(int argc, char ** argv) {
             return 1;
         }
 
-        // VAE expects interleaved [L0,R0,L1,R1,...], convert from planar
-        float * audio = (float *) malloc((size_t) T_audio * 2 * sizeof(float));
-        for (int t = 0; t < T_audio; t++) {
-            audio[t * 2 + 0] = planar[t];
-            audio[t * 2 + 1] = planar[T_audio + t];
-        }
+        float * audio = audio_planar_to_interleaved(planar, T_audio);
         free(planar);
 
         VAEEncoder enc = {};
@@ -447,7 +473,7 @@ int main(int argc, char ** argv) {
             return 1;
         }
 
-        if (audio_write_wav(output_path, audio.data(), T_audio, 48000)) {
+        if (audio_write(output_path, audio.data(), T_audio, 48000, 0)) {
             fprintf(stderr, "\n[VAE] Output: %s (%d samples, %.2fs @ 48kHz)\n", output_path, T_audio,
                     (float) T_audio / 48000.0f);
         } else {

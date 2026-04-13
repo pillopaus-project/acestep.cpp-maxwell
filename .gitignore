@@ -1,11 +1,13 @@
-build*
+build/
 *.wav
 *.bf16
-audio*
-tests*
-*.json
 
-checkpoints*
-models*
+tests/*/
 
+checkpoints/
+models/*.gguf
+loras/*/
+loras/*.safetensors
 __pycache__/
+node_modules/
+tools/webui/dist/

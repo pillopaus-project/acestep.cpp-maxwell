@@ -301,7 +301,7 @@ static struct ggml_tensor * vae_conv_t1d(struct ggml_context * ctx,
     // Step 1: Transpose x from [T_in, IC] to [IC, T_in] (contiguous copy)
     struct ggml_tensor * xt = ggml_cont(ctx, ggml_transpose(ctx, x));
 
-    // Step 2: GEMM - contracts over IC (ne[0] of both)
+    // Step 2: GEMM: contracts over IC (ne[0] of both)
     // w: [IC, K*OC]  xt: [IC, T_in]  ->  col: [K*OC, T_in]
     struct ggml_tensor * col = ggml_mul_mat(ctx, w, xt);
 
@@ -450,7 +450,7 @@ static int vae_ggml_decode(VAEGGML * m, const float * latent, int T_latent, floa
 // stride = chunk_size - 2*overlap
 // For each tile: decode latent window with overlap context, trim to core, concatenate.
 // Default chunk=256/overlap=64 matches reference code. Larger chunks (e.g. 1024)
-// reduce tile count and improve throughput; use --vae-chunk/--vae-overlap to tune.
+// reduce tile count and improve throughput; adjust chunk/overlap to tune.
 // Returns T_audio (total samples per channel) or -1 on error.
 static int vae_ggml_decode_tiled(VAEGGML *     m,
                                  const float * latent,     // [T_latent, 64] flat time-major (DiT output layout)
@@ -458,7 +458,9 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
                                  float *       audio_out,  // [2, T_audio] flat (caller allocs)
                                  int           max_T_audio,
                                  int           chunk_size = 256,
-                                 int           overlap    = 64) {
+                                 int           overlap    = 64,
+                                 bool (*cancel)(void *)   = nullptr,
+                                 void * cancel_data       = nullptr) {
     // Ensure positive stride (matches Python effective_overlap reduction)
     while (chunk_size - 2 * overlap <= 0 && overlap > 0) {
         overlap /= 2;
@@ -479,6 +481,10 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
     int   audio_write_pos = 0;
 
     for (int i = 0; i < num_steps; i++) {
+        if (cancel && cancel(cancel_data)) {
+            fprintf(stderr, "[VAE] Cancelled at tile %d/%d\n", i, num_steps);
+            return -1;
+        }
         // Core range in latent frames (the part we keep)
         int core_start = i * stride;
         int core_end   = core_start + stride;

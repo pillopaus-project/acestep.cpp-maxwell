@@ -37,7 +37,7 @@ static void debug_dump(const DebugDumper * d, const char * name, const float * d
 
     FILE * f = fopen(path, "wb");
     if (!f) {
-        fprintf(stderr, "[Debug] cannot write %s\n", path);
+        fprintf(stderr, "[Debug] Cannot write %s\n", path);
         return;
     }
 
@@ -73,15 +73,21 @@ static void debug_dump_1d(const DebugDumper * d, const char * name, const float 
 static std::vector<float> debug_load(const char * path, std::vector<int> & shape) {
     FILE * f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "[Debug] cannot read %s\n", path);
+        fprintf(stderr, "[Debug] Cannot read %s\n", path);
         return {};
     }
 
     int32_t ndims;
-    fread(&ndims, sizeof(int32_t), 1, f);
+    if (fread(&ndims, sizeof(int32_t), 1, f) != 1) {
+        fclose(f);
+        return {};
+    }
 
     shape.resize(ndims);
-    fread(shape.data(), sizeof(int32_t), ndims, f);
+    if (fread(shape.data(), sizeof(int32_t), ndims, f) != (size_t) ndims) {
+        fclose(f);
+        return {};
+    }
 
     int numel = 1;
     for (int i = 0; i < ndims; i++) {
@@ -89,7 +95,10 @@ static std::vector<float> debug_load(const char * path, std::vector<int> & shape
     }
 
     std::vector<float> data(numel);
-    fread(data.data(), sizeof(float), numel, f);
+    if (fread(data.data(), sizeof(float), numel, f) != (size_t) numel) {
+        fclose(f);
+        return {};
+    }
     fclose(f);
     return data;
 }

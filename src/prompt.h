@@ -5,6 +5,7 @@
 // CoT (Chain-of-Thought) metadata extraction, YAML builders.
 
 #include "bpe.h"
+#include "task-types.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -18,9 +19,6 @@
 #define TOKEN_THINK_END  151668
 #define AUDIO_CODE_BASE  151669
 #define AUDIO_CODE_COUNT 65535
-
-// LM system instruction (same for all 4 prompt variants, the LM always generates audio tokens)
-static const char * LM_INSTRUCTION = "Generate audio semantic tokens based on the given conditions:";
 
 // ACE-Step prompt
 struct AcePrompt {
@@ -102,7 +100,7 @@ static bool parse_cot_and_lyrics(const std::string & text, AcePrompt * out) {
 
     std::string cap = get_field("caption");
     if (!cap.empty()) {
-        // Caption may span multiple lines (yaml word-wrap)
+        // Caption may span multiple lines (YAML word-wrap), read until next field
         size_t cp = cot.find("caption:");
         if (cp != std::string::npos) {
             cp += 8;
@@ -217,6 +215,8 @@ static std::vector<int> build_lm_prompt_uncond(BPETokenizer &    bpe,
 
 // Build CoT YAML content (matching Python yaml.dump sort_keys=True)
 static std::string build_cot_yaml(const AcePrompt & prompt) {
+    // Matches Python yaml.dump(allow_unicode=True, sort_keys=True) wrapping:
+    // line break + 2-space indent when current column exceeds 80.
     auto yaml_wrap = [](const std::string & key, const std::string & val) -> std::string {
         std::string result = key + ":";
         int         col    = (int) (key.size() + 1);
@@ -341,10 +341,6 @@ static std::vector<int> build_custom_prompt(BPETokenizer & bpe, const char * sys
     append("assistant\n");
     return ids;
 }
-
-// Understand system instruction (reverse: audio codes -> metadata + lyrics)
-static const char * LM_UNDERSTAND_INSTRUCTION =
-    "Understand the given musical conditions and describe the audio semantics accordingly:";
 
 // Build understand prompt: system instruction + raw audio code tokens as user input.
 // codes[] are FSQ indices (from tok_ggml_encode or parsed from audio_codes string).

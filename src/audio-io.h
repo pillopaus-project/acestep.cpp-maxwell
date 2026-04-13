@@ -5,11 +5,15 @@
 // All functions use planar stereo float: [L: T samples][R: T samples].
 // Part of acestep.cpp. MIT license.
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
+#include <string>
+#include <thread>
+#include <vector>
 
 // wav.h: WAV reader (returns interleaved, we deinterleave below)
 #include "wav.h"
@@ -63,55 +67,63 @@ static bool audio_io_ends_with(const char * str, const char * suffix) {
     return true;
 }
 
-// Read an MP3 file via minimp3. Returns planar stereo float.
-// Caller must free() the result.
-static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
-    *T_out  = 0;
-    *sr_out = 0;
-
+// Load entire file into memory. Caller must free() the returned pointer.
+static uint8_t * audio_io_load_file(const char * path, size_t * size_out) {
+    *size_out = 0;
     FILE * fp = fopen(path, "rb");
     if (!fp) {
-        fprintf(stderr, "[Audio] cannot open %s\n", path);
+        fprintf(stderr, "[Audio] Cannot open %s\n", path);
         return NULL;
     }
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    unsigned char * mp3_buf = (unsigned char *) malloc((size_t) fsize);
-    if (!mp3_buf) {
+    uint8_t * buf = (uint8_t *) malloc((size_t) fsize);
+    if (!buf) {
         fclose(fp);
         return NULL;
     }
-    fread(mp3_buf, 1, (size_t) fsize, fp);
+    size_t nr = fread(buf, 1, (size_t) fsize, fp);
     fclose(fp);
+    if (nr != (size_t) fsize) {
+        free(buf);
+        return NULL;
+    }
+
+    *size_out = (size_t) fsize;
+    return buf;
+}
+
+// Decode MP3 from memory buffer. Returns planar stereo float [L:T][R:T].
+static float * audio_io_read_mp3_buf(const uint8_t * data, size_t size, int * T_out, int * sr_out) {
+    *T_out  = 0;
+    *sr_out = 0;
 
     mp3dec_t dec;
     mp3dec_init(&dec);
 
-    // decode all frames, accumulate interleaved short samples
     short * pcm_buf   = NULL;
     int     pcm_cap   = 0;
-    int     pcm_count = 0;  // total samples (frames * channels)
+    int     pcm_count = 0;
     int     out_sr    = 0;
     int     out_nch   = 0;
 
-    int offset = 0;
-    while (offset < fsize) {
+    size_t offset = 0;
+    while (offset < size) {
         mp3dec_frame_info_t info;
         short               pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-        int                 samples = mp3dec_decode_frame(&dec, mp3_buf + offset, (int) (fsize - offset), pcm, &info);
+        int                 samples = mp3dec_decode_frame(&dec, data + offset, (int) (size - offset), pcm, &info);
         if (info.frame_bytes == 0) {
             break;
         }
-        offset += info.frame_bytes;
+        offset += (size_t) info.frame_bytes;
 
         if (samples > 0) {
             if (out_sr == 0) {
                 out_sr  = info.hz;
                 out_nch = info.channels;
             }
-
             int need = pcm_count + samples * out_nch;
             if (need > pcm_cap) {
                 pcm_cap = (need < 65536) ? 65536 : need * 2;
@@ -121,23 +133,20 @@ static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
             pcm_count += samples * out_nch;
         }
     }
-    free(mp3_buf);
 
     if (pcm_count == 0 || out_sr == 0) {
-        fprintf(stderr, "[Audio] no audio decoded from %s\n", path);
+        fprintf(stderr, "[Audio] No audio decoded from buffer\n");
         free(pcm_buf);
         return NULL;
     }
 
     int T = pcm_count / out_nch;
 
-    // convert to planar stereo float
     float * planar = (float *) malloc((size_t) T * 2 * sizeof(float));
     if (!planar) {
         free(pcm_buf);
         return NULL;
     }
-
     for (int t = 0; t < T; t++) {
         float l       = (float) pcm_buf[t * out_nch + 0] / 32768.0f;
         float r       = (out_nch >= 2) ? (float) pcm_buf[t * out_nch + 1] / 32768.0f : l;
@@ -148,30 +157,26 @@ static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
 
     *T_out  = T;
     *sr_out = out_sr;
-
-    fprintf(stderr, "[MP3] read %s: %d samples, %d Hz, %d ch\n", path, T, out_sr, out_nch);
+    fprintf(stderr, "[MP3] Read buffer: %d samples, %d Hz, %d ch\n", T, out_sr, out_nch);
     return planar;
 }
 
-// Read a WAV file. Returns planar stereo float.
-// Wraps read_wav from wav.h (which returns interleaved) and deinterleaves.
-static float * audio_io_read_wav(const char * path, int * T_out, int * sr_out) {
+// Decode WAV from memory buffer. Returns planar stereo float [L:T][R:T].
+static float * audio_io_read_wav_buf(const uint8_t * data, size_t size, int * T_out, int * sr_out) {
     *T_out  = 0;
     *sr_out = 0;
 
     int     T = 0, sr = 0;
-    float * interleaved = read_wav(path, &T, &sr);
+    float * interleaved = read_wav_buf(data, size, &T, &sr);
     if (!interleaved) {
         return NULL;
     }
 
-    // read_wav always returns stereo interleaved [L0,R0,L1,R1,...]
     float * planar = (float *) malloc((size_t) T * 2 * sizeof(float));
     if (!planar) {
         free(interleaved);
         return NULL;
     }
-
     for (int t = 0; t < T; t++) {
         planar[t]     = interleaved[t * 2 + 0];
         planar[T + t] = interleaved[t * 2 + 1];
@@ -181,6 +186,72 @@ static float * audio_io_read_wav(const char * path, int * T_out, int * sr_out) {
     *T_out  = T;
     *sr_out = sr;
     return planar;
+}
+
+// Decode WAV or MP3 from memory buffer (auto-detect from magic bytes).
+// Returns planar stereo float [L:T][R:T]. Caller frees.
+static float * audio_read_buf(const uint8_t * data, size_t size, int * T_out, int * sr_out) {
+    if (size >= 4 && memcmp(data, "RIFF", 4) == 0) {
+        return audio_io_read_wav_buf(data, size, T_out, sr_out);
+    }
+    return audio_io_read_mp3_buf(data, size, T_out, sr_out);
+}
+
+// Decode WAV or MP3 from memory buffer and resample to 48000 Hz stereo.
+// Returns planar stereo float [L:T][R:T]. Caller frees.
+static float * audio_read_48k_buf(const uint8_t * data, size_t size, int * T_out) {
+    int     T = 0, sr = 0;
+    float * raw = audio_read_buf(data, size, &T, &sr);
+    if (!raw) {
+        *T_out = 0;
+        return NULL;
+    }
+
+    if (sr == 48000) {
+        *T_out = T;
+        return raw;
+    }
+
+    int T_rs = 0;
+    fprintf(stderr, "[Audio-Resample] %d Hz -> 48000 Hz, %d samples...\n", sr, T);
+    float * resampled = audio_resample(raw, T, sr, 48000, 2, &T_rs);
+    free(raw);
+
+    if (!resampled) {
+        fprintf(stderr, "[Audio-Resample] Resample failed\n");
+        *T_out = 0;
+        return NULL;
+    }
+
+    fprintf(stderr, "[Audio-Resample] Done: %d -> %d samples\n", T, T_rs);
+
+    *T_out = T_rs;
+    return resampled;
+}
+
+// File-based wrappers: load file into memory, delegate to buffer functions.
+// Used by CLI tools that take file paths as arguments.
+
+static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
+    size_t    size = 0;
+    uint8_t * buf  = audio_io_load_file(path, &size);
+    if (!buf) {
+        return NULL;
+    }
+    float * result = audio_io_read_mp3_buf(buf, size, T_out, sr_out);
+    free(buf);
+    return result;
+}
+
+static float * audio_io_read_wav(const char * path, int * T_out, int * sr_out) {
+    size_t    size = 0;
+    uint8_t * buf  = audio_io_load_file(path, &size);
+    if (!buf) {
+        return NULL;
+    }
+    float * result = audio_io_read_wav_buf(buf, size, T_out, sr_out);
+    free(buf);
+    return result;
 }
 
 // Read WAV or MP3 (auto-detect from extension).
@@ -208,94 +279,174 @@ static float * audio_read_48k(const char * path, int * T_out) {
     }
 
     int T_rs = 0;
-    fprintf(stderr, "[Audio-resample] %d Hz -> 48000 Hz, %d samples...\n", sr, T);
+    fprintf(stderr, "[Audio-Resample] %d Hz -> 48000 Hz, %d samples...\n", sr, T);
     float * resampled = audio_resample(raw, T, sr, 48000, 2, &T_rs);
     free(raw);
 
     if (!resampled) {
-        fprintf(stderr, "[Audio-resample] resample failed\n");
+        fprintf(stderr, "[Audio-Resample] Resample failed\n");
         *T_out = 0;
         return NULL;
     }
 
-    fprintf(stderr, "[Audio-resample] Done: %d -> %d samples\n", T, T_rs);
+    fprintf(stderr, "[Audio-Resample] Done: %d -> %d samples\n", T, T_rs);
 
     *T_out = T_rs;
     return resampled;
 }
 
-// Write planar stereo float to WAV 16-bit PCM.
-// audio: [L: T_audio][R: T_audio], clipped to [-1, 1].
-static bool audio_write_wav(const char * path, const float * audio, int T_audio, int sr) {
-    FILE * f = fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "[Audio] cannot open %s for writing\n", path);
-        return false;
+// maximize perceived loudness via percentile normalization.
+// peak_clip controls the tradeoff between loudness and clipping:
+//   0   = peak normalization (100.0000th percentile, no clipping)
+//   10  = default (99.9990th percentile, clips top 0.001%)
+//   999 = max (99.9001th percentile, clips top 0.1%)
+// the target percentile is 1.0 - peak_clip/1000000.0.
+// n_total = number of float samples (both channels combined).
+static void audio_normalize(float * audio, int n_total, int peak_clip = 10) {
+    if (n_total <= 0) {
+        return;
     }
 
+    // clamp to valid range
+    if (peak_clip < 0) {
+        peak_clip = 0;
+    }
+    if (peak_clip > 999) {
+        peak_clip = 999;
+    }
+
+    // collect absolute values
+    std::vector<float> absvals((size_t) n_total);
+    for (int i = 0; i < n_total; i++) {
+        absvals[i] = audio[i] < 0.0f ? -audio[i] : audio[i];
+    }
+
+    // partial sort to find the target percentile
+    double pct = 1.0 - (double) peak_clip / 1000000.0;
+    size_t idx = (size_t) ((double) (n_total - 1) * pct);
+    std::nth_element(absvals.begin(), absvals.begin() + idx, absvals.end());
+    float ref = absvals[idx];
+
+    if (ref < 1e-6f) {
+        return;
+    }
+
+    // scale so the target percentile hits 1.0, hard clip the rest
+    float gain = 1.0f / ref;
+    for (int i = 0; i < n_total; i++) {
+        float v = audio[i] * gain;
+        if (v > 1.0f) {
+            v = 1.0f;
+        } else if (v < -1.0f) {
+            v = -1.0f;
+        }
+        audio[i] = v;
+    }
+}
+
+// convert planar [L:T][R:T] to interleaved [L0,R0,L1,R1,...].
+// returns malloc'd buffer of 2*T floats. caller must free().
+static float * audio_planar_to_interleaved(const float * planar, int T) {
+    float * out = (float *) malloc((size_t) T * 2 * sizeof(float));
+    for (int t = 0; t < T; t++) {
+        out[t * 2 + 0] = planar[t];
+        out[t * 2 + 1] = planar[T + t];
+    }
+    return out;
+}
+
+// audio_encode_wav is the core: encode planar stereo to WAV 16-bit PCM in memory.
+// 44-byte RIFF header + interleaved int16 samples.
+// audio is planar [L0..LN, R0..RN], pre-normalized by caller.
+// Does NOT normalize - caller is responsible (audio_write does it).
+// Returns empty string on failure.
+static std::string audio_encode_wav(const float * audio, int T_audio, int sr) {
     int n_channels = 2, bits = 16;
     int byte_rate   = sr * n_channels * (bits / 8);
     int block_align = n_channels * (bits / 8);
     int data_size   = T_audio * n_channels * (bits / 8);
     int file_size   = 36 + data_size;
 
-    fwrite("RIFF", 1, 4, f);
-    fwrite(&file_size, 4, 1, f);
-    fwrite("WAVE", 1, 4, f);
-    fwrite("fmt ", 1, 4, f);
+    std::string out;
+    out.resize(44 + (size_t) data_size);
+    char * p = &out[0];
+
+    // RIFF header
+    memcpy(p, "RIFF", 4);
+    p += 4;
+    memcpy(p, &file_size, 4);
+    p += 4;
+    memcpy(p, "WAVE", 4);
+    p += 4;
+    memcpy(p, "fmt ", 4);
+    p += 4;
     int   fmt_size = 16;
     short fmt_tag  = 1;
     short nc       = (short) n_channels;
     short ba       = (short) block_align;
     short bp       = (short) bits;
-    fwrite(&fmt_size, 4, 1, f);
-    fwrite(&fmt_tag, 2, 1, f);
-    fwrite(&nc, 2, 1, f);
-    fwrite(&sr, 4, 1, f);
-    fwrite(&byte_rate, 4, 1, f);
-    fwrite(&ba, 2, 1, f);
-    fwrite(&bp, 2, 1, f);
-    fwrite("data", 1, 4, f);
-    fwrite(&data_size, 4, 1, f);
+    memcpy(p, &fmt_size, 4);
+    p += 4;
+    memcpy(p, &fmt_tag, 2);
+    p += 2;
+    memcpy(p, &nc, 2);
+    p += 2;
+    memcpy(p, &sr, 4);
+    p += 4;
+    memcpy(p, &byte_rate, 4);
+    p += 4;
+    memcpy(p, &ba, 2);
+    p += 2;
+    memcpy(p, &bp, 2);
+    p += 2;
+    memcpy(p, "data", 4);
+    p += 4;
+    memcpy(p, &data_size, 4);
+    p += 4;
 
-    // buffer all samples then write once (avoids millions of fwrite syscalls)
+    // interleave planar float to PCM int16
     const float * L   = audio;
     const float * R   = audio + T_audio;
-    short *       pcm = (short *) malloc((size_t) T_audio * 2 * sizeof(short));
-    if (!pcm) {
-        fclose(f);
+    short *       pcm = (short *) p;
+    for (int t = 0; t < T_audio; t++) {
+        pcm[t * 2 + 0] = (short) (L[t] * 32767.0f);
+        pcm[t * 2 + 1] = (short) (R[t] * 32767.0f);
+    }
+
+    return out;
+}
+
+// Write planar stereo audio to WAV file. Thin wrapper around audio_encode_wav.
+static bool audio_write_wav(const char * path, const float * audio, int T_audio, int sr) {
+    std::string wav = audio_encode_wav(audio, T_audio, sr);
+    if (wav.empty()) {
         return false;
     }
-    for (int t = 0; t < T_audio; t++) {
-        float lf = L[t];
-        float rf = R[t];
-        if (lf > 1.0f) {
-            lf = 1.0f;
-        }
-        if (lf < -1.0f) {
-            lf = -1.0f;
-        }
-        if (rf > 1.0f) {
-            rf = 1.0f;
-        }
-        if (rf < -1.0f) {
-            rf = -1.0f;
-        }
-        pcm[t * 2 + 0] = (short) (lf * 32767.0f);
-        pcm[t * 2 + 1] = (short) (rf * 32767.0f);
-    }
-    fwrite(pcm, 2, (size_t) T_audio * 2, f);
-    free(pcm);
 
-    fclose(f);
-    fprintf(stderr, "[WAV] wrote %s: %d samples, %d Hz, stereo\n", path, T_audio, sr);
+    FILE * fp = fopen(path, "wb");
+    if (!fp) {
+        fprintf(stderr, "[Audio] Cannot open %s for writing\n", path);
+        return false;
+    }
+    fwrite(wav.data(), 1, wav.size(), fp);
+    fclose(fp);
+
+    fprintf(stderr, "[WAV] Wrote %s: %d samples, %d Hz, stereo\n", path, T_audio, sr);
     return true;
 }
 
 // Encode planar stereo float to MP3.
 // sr must be 32000, 44100, or 48000 (MP3 MPEG1 rates).
 // If sr is unsupported, resamples to 44100 first.
-static bool audio_write_mp3(const char * path, const float * audio, int T_audio, int sr, int kbps) {
+// audio_encode_mp3 is the core: encode planar stereo to MP3 in memory.
+// Does NOT normalize - caller is responsible (audio_write does it).
+// Returns empty string on failure.
+static std::string audio_encode_mp3(const float * audio,
+                                    int           T_audio,
+                                    int           sr,
+                                    int           kbps,
+                                    bool (*cancel)(void *) = nullptr,
+                                    void * cancel_data     = nullptr) {
     const float * enc_audio = audio;
     int           enc_T     = T_audio;
     int           enc_sr    = sr;
@@ -306,75 +457,203 @@ static bool audio_write_mp3(const char * path, const float * audio, int T_audio,
         int T_rs  = 0;
         resampled = audio_resample(audio, T_audio, sr, 44100, 2, &T_rs);
         if (!resampled) {
-            fprintf(stderr, "[Audio-resample] resample failed\n");
-            return false;
+            fprintf(stderr, "[Audio-Resample] Resample failed\n");
+            return "";
         }
-        fprintf(stderr, "[Audio-resample] %d Hz -> 44100 Hz (%d -> %d samples)\n", sr, T_audio, T_rs);
+        fprintf(stderr, "[Audio-Resample] %d Hz -> 44100 Hz (%d -> %d samples)\n", sr, T_audio, T_rs);
         enc_audio = resampled;
         enc_T     = T_rs;
         enc_sr    = 44100;
     }
 
-    mp3enc_t * enc = mp3enc_init(enc_sr, 2, kbps);
-    if (!enc) {
-        fprintf(stderr, "[Audio] mp3enc_init failed: %d Hz, %d kbps\n", enc_sr, kbps);
-        free(resampled);
+    float duration = (float) enc_T / (float) enc_sr;
+    fprintf(stderr, "[MP3] Encoding %.1fs @ %d kbps, %d Hz stereo\n", duration, kbps, enc_sr);
+
+    // thread count: all logical cores. MP3 is ALU-bound with small working set,
+    // hyperthreads help (unlike GGML GEMM which shares SIMD units).
+    // minimum ~2s per chunk so filter warmup at boundaries is negligible.
+    int n_threads = (int) std::thread::hardware_concurrency();
+    if (n_threads < 1) {
+        n_threads = 1;
+    }
+    int total_frames = (enc_T + 1151) / 1152;
+    int min_frames   = (enc_sr * 2 + 1151) / 1152;  // ~2s worth of frames
+    int max_threads  = total_frames / (min_frames > 0 ? min_frames : 1);
+    if (max_threads < 1) {
+        max_threads = 1;
+    }
+    if (n_threads > max_threads) {
+        n_threads = max_threads;
+    }
+
+    // per-thread sample ranges, aligned to 1152 (MP3 frame boundary).
+    // each thread gets its own encoder instance. threads > 0 pre-encode
+    // warmup frames from before their start to prime the filterbank, MDCT
+    // overlap, and psy state. the warmup output is discarded via flush.
+    // after flush, pending_bytes=0 so the first real frame naturally gets
+    // main_data_begin=0 (self-contained, no reservoir reference). cost:
+    // one frame of lost reservoir per boundary (~26ms of slightly lower
+    // quality), but filter/MDCT/psy are fully primed = no audible gap.
+    static const int WARMUP_FRAMES = 3;
+
+    struct chunk_range {
+        int start;
+        int end;
+    };
+
+    std::vector<chunk_range> ranges(n_threads);
+    {
+        int base = total_frames / n_threads;
+        int rem  = total_frames % n_threads;
+        int f    = 0;
+        for (int t = 0; t < n_threads; t++) {
+            int nf          = base + (t < rem ? 1 : 0);
+            ranges[t].start = f * 1152;
+            f += nf;
+            ranges[t].end = (t == n_threads - 1) ? enc_T : f * 1152;
+        }
+    }
+
+    auto t_start = std::chrono::steady_clock::now();
+
+    std::vector<std::string> results(n_threads);
+
+    // worker: encode one chunk with a private encoder instance.
+    // feeds 1-second sub-chunks for cancel responsiveness.
+    auto worker = [&](int tid) {
+        int chunk_start = ranges[tid].start;
+        int chunk_end   = ranges[tid].end;
+        if (chunk_end <= chunk_start) {
+            return;
+        }
+
+        mp3enc_t * e = mp3enc_init(enc_sr, 2, kbps);
+        if (!e) {
+            return;
+        }
+
+        // warmup: encode frames from before chunk_start to prime encoder
+        // state (filter, sb_prev, psy). output is discarded via flush.
+        // warmup length is exact multiple of 1152 so pcm_fill=0 after.
+        if (tid > 0 && chunk_start > 0) {
+            int n_warm = WARMUP_FRAMES;
+            if (n_warm > chunk_start / 1152) {
+                n_warm = chunk_start / 1152;
+            }
+            if (n_warm > 0) {
+                int warm_len   = n_warm * 1152;
+                int warm_start = chunk_start - warm_len;
+
+                float * buf = (float *) malloc((size_t) warm_len * 2 * sizeof(float));
+                memcpy(buf, enc_audio + warm_start, (size_t) warm_len * sizeof(float));
+                memcpy(buf + warm_len, enc_audio + enc_T + warm_start, (size_t) warm_len * sizeof(float));
+
+                int sz = 0;
+                mp3enc_encode(e, buf, warm_len, &sz);
+                free(buf);
+            }
+
+            // flush: output and discard warmup frames. after this,
+            // pending_bytes=0 so next frame gets main_data_begin=0
+            // naturally. filter and sb_prev state are preserved.
+            int flush_sz = 0;
+            mp3enc_flush(e, &flush_sz);
+            e->out_written = 0;
+        }
+
+        // encode real chunk
+        int chunk_len = chunk_end - chunk_start;
+        int sub       = enc_sr;  // ~1 second
+        for (int p = 0; p < chunk_len; p += sub) {
+            if (cancel && cancel(cancel_data)) {
+                break;
+            }
+            int len = (p + sub <= chunk_len) ? sub : (chunk_len - p);
+
+            float * buf = (float *) malloc((size_t) len * 2 * sizeof(float));
+            memcpy(buf, enc_audio + chunk_start + p, (size_t) len * sizeof(float));
+            memcpy(buf + len, enc_audio + enc_T + chunk_start + p, (size_t) len * sizeof(float));
+
+            int             sz  = 0;
+            const uint8_t * mp3 = mp3enc_encode(e, buf, len, &sz);
+            results[tid].append((const char *) mp3, (size_t) sz);
+            free(buf);
+        }
+
+        int             flush_sz = 0;
+        const uint8_t * flush    = mp3enc_flush(e, &flush_sz);
+        results[tid].append((const char *) flush, (size_t) flush_sz);
+        mp3enc_free(e);
+    };
+
+    // fork-join: main thread takes chunk 0, spawn threads for the rest
+    if (n_threads == 1) {
+        worker(0);
+    } else {
+        std::vector<std::thread> threads;
+        for (int t = 1; t < n_threads; t++) {
+            threads.emplace_back(worker, t);
+        }
+        worker(0);
+        for (auto & th : threads) {
+            th.join();
+        }
+    }
+
+    auto  t_end     = std::chrono::steady_clock::now();
+    float encode_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+
+    free(resampled);
+
+    if (cancel && cancel(cancel_data)) {
+        fprintf(stderr, "[MP3] Cancelled\n");
+        return "";
+    }
+
+    // concatenate thread outputs (order = chunk order = correct MP3 stream)
+    size_t total_bytes = 0;
+    for (auto & r : results) {
+        total_bytes += r.size();
+    }
+    std::string out;
+    out.reserve(total_bytes);
+    for (auto & r : results) {
+        out.append(r);
+    }
+
+    float realtime = (encode_ms > 0.0f) ? (duration * 1000.0f / encode_ms) : 0.0f;
+    float ratio    = (enc_T > 0) ? (float) (enc_T * 2 * 2) / (float) out.size() : 0.0f;
+    fprintf(stderr, "[MP3] %zu bytes (%.1f:1), %.0f ms (%.2fx realtime), %d threads\n", out.size(), ratio, encode_ms,
+            realtime, n_threads);
+    return out;
+}
+
+// Write planar stereo audio to MP3 file. Thin wrapper around audio_encode_mp3.
+static bool audio_write_mp3(const char * path, const float * audio, int T_audio, int sr, int kbps) {
+    std::string mp3 = audio_encode_mp3(audio, T_audio, sr, kbps);
+    if (mp3.empty()) {
         return false;
     }
 
     FILE * fp = fopen(path, "wb");
     if (!fp) {
-        fprintf(stderr, "[Audio] cannot open %s for writing\n", path);
-        mp3enc_free(enc);
-        free(resampled);
+        fprintf(stderr, "[Audio] Cannot open %s for writing\n", path);
         return false;
     }
-
-    float duration = (float) enc_T / (float) enc_sr;
-    fprintf(stderr, "[MP3] encoding %.1fs @ %d kbps, %d Hz stereo\n", duration, kbps, enc_sr);
-
-    clock_t t_start = clock();
-
-    // encode in 1-second chunks to keep memory usage low
-    int chunk   = enc_sr;
-    int written = 0;
-    for (int pos = 0; pos < enc_T; pos += chunk) {
-        int n = (pos + chunk <= enc_T) ? chunk : (enc_T - pos);
-
-        // build planar chunk for this segment
-        float * buf = (float *) malloc((size_t) n * 2 * sizeof(float));
-        memcpy(buf, enc_audio + pos, (size_t) n * sizeof(float));
-        memcpy(buf + n, enc_audio + enc_T + pos, (size_t) n * sizeof(float));
-
-        int             out_size = 0;
-        const uint8_t * mp3      = mp3enc_encode(enc, buf, n, &out_size);
-        fwrite(mp3, 1, (size_t) out_size, fp);
-        written += out_size;
-        free(buf);
-    }
-
-    int             flush_size = 0;
-    const uint8_t * flush_data = mp3enc_flush(enc, &flush_size);
-    fwrite(flush_data, 1, (size_t) flush_size, fp);
-    written += flush_size;
-
-    float encode_ms = (float) (clock() - t_start) * 1000.0f / (float) CLOCKS_PER_SEC;
-    float realtime  = (encode_ms > 0.0f) ? (duration * 1000.0f / encode_ms) : 0.0f;
-
+    fwrite(mp3.data(), 1, mp3.size(), fp);
     fclose(fp);
-    mp3enc_free(enc);
-    free(resampled);
 
-    float ratio = (enc_T > 0) ? (float) (enc_T * 2 * 2) / (float) written : 0.0f;
-    fprintf(stderr, "[MP3] wrote %s: %d bytes (%.1f:1), %.0f ms (%.2fx realtime)\n", path, written, ratio, encode_ms,
-            realtime);
+    fprintf(stderr, "[MP3] Wrote %s\n", path);
     return true;
 }
 
 // Write audio, auto-detect format from extension.
 // .mp3 -> MP3 encoding at the given kbps (default 128).
 // .wav (or anything else) -> WAV 16-bit PCM.
-static bool audio_write(const char * path, const float * audio, int T_audio, int sr, int kbps) {
+// Normalizes in place before writing (single normalization point).
+static bool audio_write(const char * path, float * audio, int T_audio, int sr, int kbps, int peak_clip = 10) {
+    audio_normalize(audio, T_audio * 2, peak_clip);
+
     if (audio_io_ends_with(path, ".mp3")) {
         return audio_write_mp3(path, audio, T_audio, sr, (kbps > 0) ? kbps : 128);
     }

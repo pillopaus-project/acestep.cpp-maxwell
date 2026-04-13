@@ -4,8 +4,8 @@
 #mkdir build-cuda
 cd build-cuda
 
-#make clean
+make clean
 
-cmake .. -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON -DGGML_BLAS=ON
+cmake .. -DGGML_CUDA=ON  -DGGML_BLAS=ON 
 
 cmake --build . --config Release -j "$(nproc)"

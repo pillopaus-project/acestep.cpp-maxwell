@@ -34,8 +34,6 @@ cd acestep.cpp
 
 ### Windows
 
-Pre-built binaries (until CI is set up): https://www.serveurperso.com/temp/acestep.cpp-win64/
-
 To build from source, install
 [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 (select "Desktop development with C++" workload) and optionally the

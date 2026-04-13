@@ -65,7 +65,8 @@ void ace_synth_free(AceSynth * ctx);
 void ace_dit_free(AceSynth * ctx);
 void ace_all_free(AceSynth * ctx);
 void ace_condenc_free(AceSynth * ctx);
-void ace_tokdetok_free(AceSynth * ctx);
+void ace_tok_free(AceSynth * ctx);
+void ace_detok_free(AceSynth * ctx);
 void ace_textenc_free(AceSynth * ctx);
 
 int ace_dit_load(AceSynth * ctx);

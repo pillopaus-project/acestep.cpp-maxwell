@@ -3,8 +3,11 @@ build*/
 *.bf16
 
 tests/*/
-
+json/*
 checkpoints/
+models
+refs/*
+refs
 models/*.gguf
 loras/*/
 loras/*.safetensors

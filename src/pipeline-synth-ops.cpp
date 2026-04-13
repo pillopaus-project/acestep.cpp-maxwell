@@ -135,8 +135,8 @@ int ops_resolve_params(AceSynth * ctx, const AceRequest * reqs, int batch_n, Syn
     s.guidance_scale = s.rr.guidance_scale;
     s.shift          = s.rr.shift;
 
-    if (s.num_steps <= 0) {
-        s.num_steps = ctx->is_turbo ? 8 : 50;
+    if (s.num_steps <= 4) {
+        s.num_steps = ctx->is_turbo ? 10 : 50;
     }
     if (s.num_steps > 100) {
         fprintf(stderr, "[Resolve-Params] WARNING: inference_steps %d clamped to 100\n", s.num_steps);

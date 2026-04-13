@@ -180,7 +180,7 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
     // Detokenizer (for audio_codes mode, weights in DiT GGUF)
     timer.reset();
     ctx->detok = {};
-    if (detok_ggml_load(&ctx->detok, params->dit_path, ctx->dit.backend, ctx->dit.cpu_backend)) {
+    if (detok_ggml_load(&ctx->detok, params->dit_path)) {
         if (!params->use_fa) {
             ctx->detok.use_flash_attn = false;
         }
@@ -191,15 +191,16 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
     // Tokenizer (for FSQ roundtrip in cover mode, weights in DiT GGUF)
     timer.reset();
     ctx->tok = {};
-    if (tok_ggml_load(&ctx->tok, params->dit_path, ctx->dit.backend, ctx->dit.cpu_backend)) {
+    if (tok_ggml_load(&ctx->tok, params->dit_path)) {
+        if (!params->use_fa) {
+            ctx->tok.use_flash_attn = false;
+        }
         ctx->have_tok = true;
         fprintf(stderr, "[Synth-Load] Tokenizer: %.1f ms\n", timer.ms());
     }
 
-    fprintf(stderr, "[Ace-Synth] All models loaded, turbo=%s\n", ctx->is_turbo ? "yes" : "no");
-    if (!params->use_fa) {
-        fprintf(stderr, "[Ace-Synth] flash attention disabled\n");
-    }
+    fprintf(stderr, "[Ace-Synth] All models loaded, turbo=%s, fa=%s\n", ctx->is_turbo ? "yes" : "no",
+            ctx->dit.use_flash_attn ? "yes" : "no");
     if (params->clamp_fp16) {
         fprintf(stderr, "[Ace-Synth] FP16 clamp enabled\n");
     }
@@ -490,7 +491,7 @@ void ace_dit_free(AceSynth * ctx) {
         return;
     }
     dit_ggml_free(&ctx->dit);
-    fprintf(stderr, "[FREE] [Synth-Load] DiT \n");
+    fprintf(stderr, "[FREE] DiT \n");
 }
 
 void ace_textenc_free(AceSynth * ctx) {
@@ -498,20 +499,27 @@ void ace_textenc_free(AceSynth * ctx) {
         return;
     }
     qwen3_free(&ctx->text_enc);
-    fprintf(stderr, "[FREE] [Synth-Load] text_enc \n");
+    fprintf(stderr, "[FREE]  text_enc \n");
 }
 
-void ace_tokdetok_free(AceSynth * ctx) {
+void ace_tok_free(AceSynth * ctx) {
+    if (!ctx) {
+        return;
+    }
+    if (ctx->have_tok) {
+        tok_ggml_free(&ctx->tok);
+    }
+    fprintf(stderr, "[FREE] Tok \n");
+}
+
+void ace_detok_free(AceSynth * ctx) {
     if (!ctx) {
         return;
     }
     if (ctx->have_detok) {
         detok_ggml_free(&ctx->detok);
     }
-    if (ctx->have_tok) {
-        tok_ggml_free(&ctx->tok);
-    }
-    fprintf(stderr, "[FREE] [Synth-Load] Tok/deTok \n");
+    fprintf(stderr, "[FREE] Detok \n");
 }
 
 void ace_condenc_free(AceSynth * ctx) {
@@ -519,9 +527,9 @@ void ace_condenc_free(AceSynth * ctx) {
         return;
     }
     cond_ggml_free(&ctx->cond_enc);
-    fprintf(stderr, "[FREE][Synth-Load]  condenc \n");
+    fprintf(stderr, "[FREE] condenc \n");
 }
-
+////////////////////////////   Reloads   //////////////////////
 void ace_dit_reload(AceSynth * ctx) {
     dit_ggml_init_backend(&ctx->dit);
     if (use_fa) {
@@ -529,9 +537,9 @@ void ace_dit_reload(AceSynth * ctx) {
     }
     fprintf(stderr, "[RELOAD] Backend init\n");
     if (!dit_ggml_load(&ctx->dit, dit_path, lora_path, lora_scale)) {
-        fprintf(stderr, "[RELOAD][Synth-Load][DiT] FATAL: failed to load model\n");
+        fprintf(stderr, "[RELOAD][Synth][DiT] FATAL: failed to load model\n");
     }
-    fprintf(stderr, "[RELOAD] [Synth-Load]DiT weight load: \n");
+    fprintf(stderr, "[RELOAD] [Synth] DiT weight load: \n");
 }
 
 void ace_textenc_reload(AceSynth * ctx) {
@@ -539,9 +547,9 @@ void ace_textenc_reload(AceSynth * ctx) {
 //    ctx->text_enc = {};
     qwen3_init_backend(&ctx->text_enc);
     if (!qwen3_load_text_encoder(&ctx->text_enc, text_encoder_path)) {
-        fprintf(stderr, "[RELOAD][Synth-Load][TextEncoder] FATAL: failed to load\n");
+        fprintf(stderr, "[RELOAD][Synth][TextEncoder] FATAL: failed to load\n");
     } else {
-        fprintf(stderr, "[RELOAD][Synth-Load] TextEncoder\n");
+        fprintf(stderr, "[RELOAD][Synth] TextEncoder\n");
     }
 }
 
@@ -549,40 +557,27 @@ void ace_condenc_reload(AceSynth * ctx) {  // 6. Condition encoder forward
 //    ctx->cond_enc = {};
     cond_ggml_init_backend(&ctx->cond_enc);
     if (!cond_ggml_load(&ctx->cond_enc, dit_path)) {
-        fprintf(stderr, "[RELOAD][Synth-Load][CondEncoder] FATAL: failed to load\n");
+        fprintf(stderr, "[RELOAD][Synth][CondEncoder] FATAL: failed to load\n");
     } else {
-        fprintf(stderr, "[RELOAD][Synth-Load] ConditionEncoder\n");
+        fprintf(stderr, "[RELOAD][Synth] ConditionEncoder\n");
     }
 }
 
 void ace_bpe_reload(AceSynth * ctx) {  // 1. Load BPE tokenizer
     if (!load_bpe_from_gguf(&ctx->bpe, text_encoder_path)) {
-        fprintf(stderr, "[RELOAD][Synth-Load][BPE] FATAL: failed to load tokenizer from %s\n", text_encoder_path);
+        fprintf(stderr, "[RELOAD][Synth][BPE] FATAL: failed to load tokenizer from %s\n", text_encoder_path);
     } else {
-        fprintf(stderr, "[RELOAD] [Synth-Load]BPE tokenizer\n");
+        fprintf(stderr, "[RELOAD] [Synth] BPE tokenizer\n");
     }
 }
 
-void ace_tok_detok_reload(AceSynth * ctx) {  
-    // Detokenizer (for audio_codes mode, weights in DiT GGUF)
-   //    ctx->detok = {};
-    if (detok_ggml_load(&ctx->detok, dit_path, ctx->dit.backend, ctx->dit.cpu_backend)) {
-        ctx->have_detok = true;
-        fprintf(stderr, "[RELOAD] [Synth-Load]Detokenizer\n");
-    }
-    // Tokenizer (for FSQ roundtrip in cover mode, weights in DiT GGUF)
-    //    ctx->tok = {};
-    if (tok_ggml_load(&ctx->tok, dit_path, ctx->dit.backend, ctx->dit.cpu_backend)) {
-        ctx->have_tok = true;
-        fprintf(stderr, "[RELOAD][Synth-Load] Tokenizer\n");
-    }
-}
-
+///////////////////////////////   LOAD   ///////////////////////////////////
 int ace_dit_load(AceSynth * ctx) {
     if (!ctx) {
         return -1;
     }
-            return 0;
+
+    return 0;
 }
 
 int ace_detok_load (AceSynth * ctx) {
@@ -592,7 +587,7 @@ int ace_detok_load (AceSynth * ctx) {
         // Detokenizer (for audio_codes mode, weights in DiT GGUF)
     timer.reset();
     ctx->detok = {};
-    if (detok_ggml_load(&ctx->detok, dit_path, ctx->dit.backend, ctx->dit.cpu_backend)) {
+    if (detok_ggml_load(&ctx->detok, dit_path)) {
         if (!use_fa) {
             ctx->detok.use_flash_attn = false;
         }
@@ -600,22 +595,24 @@ int ace_detok_load (AceSynth * ctx) {
         fprintf(stderr, "[Synth-Load] Detokenizer: %.1f ms\n", timer.ms());
     }
 
-        return 0;
+    return 0;
 }
 
 int ace_tok_load (AceSynth * ctx) {
     if (!ctx) {
         return -1;
     }
-
-    // Tokenizer (for FSQ roundtrip in cover mode, weights in DiT GGUF)
+            // Tokenizer (for FSQ roundtrip in cover mode, weights in DiT GGUF)
     timer.reset();
     ctx->tok = {};
-    if (tok_ggml_load(&ctx->tok, dit_path, ctx->dit.backend, ctx->dit.cpu_backend)) {
+    if (tok_ggml_load(&ctx->tok, dit_path)) {
+        if (!use_fa) {
+            ctx->tok.use_flash_attn = false;
+        }
         ctx->have_tok = true;
         fprintf(stderr, "[Synth-Load] Tokenizer: %.1f ms\n", timer.ms());
     }
-        return 0;
+    return 0;
 }
 
 int ace_bpe_load(AceSynth * ctx) {

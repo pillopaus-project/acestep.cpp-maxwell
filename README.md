@@ -1,5 +1,5 @@
 Nvidia MaxWell 4Gb Vram fork of :
-# acestep.cpp
+[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp)
 
 Local AI music generation server with browser UI, powered by GGML.
 Describe a song, get stereo 48kHz audio. Runs on CPU, CUDA, Metal, Vulkan.

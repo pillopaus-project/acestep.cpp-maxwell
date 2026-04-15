@@ -28,31 +28,15 @@ Alternative: `./models.sh` downloads the default set automatically (needs `pip i
 ## Build
 
 ```
-git clone --recurse-submodules https://github.com/ServeurpersoCom/acestep.cpp.git
-cd acestep.cpp
-```
-
-### Windows
-
-To build from source, install
-[Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-(select "Desktop development with C++" workload) and optionally the
-[CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) and/or the
-[Vulkan SDK](https://vulkan.lunarg.com/sdk/home).
-
-```cmd
-buildcuda.cmd     # NVIDIA GPU
-buildvulkan.cmd   # AMD/Intel GPU (Vulkan)
-buildall.cmd      # all backends (CUDA + Vulkan + CPU, runtime loading)
+git clone --recurse-submodules https://github.com/pillopaus-project/acestep.cpp-maxwell.git
+cd acestep.cpp-maxwell
 ```
 
 ### Linux / macOS
 
 ```bash
-./buildcuda.sh    # NVIDIA GPU
-./buildvulkan.sh  # AMD/Intel GPU (Vulkan)
-./buildcpu.sh     # CPU only (with BLAS)
-./buildall.sh     # all backends (CUDA + Vulkan + CPU, runtime loading)
+./cudabuild.sh    # NVIDIA GPU
+./cpubuild.sh     # CPU only (with BLAS)
 ```
 
 macOS auto-enables Metal and Accelerate BLAS with any of the above.
@@ -61,7 +45,6 @@ macOS auto-enables Metal and Accelerate BLAS with any of the above.
 
 ```bash
 ./server.sh       # Linux / macOS
-server.cmd        # Windows
 ```
 
 Open http://localhost:8085 in your browser. The WebUI handles everything:
@@ -153,18 +136,6 @@ internals.
 - [acestep-cpp-ui](https://github.com/audiohacking/acestep-cpp-ui)
 - [acestep.cpp-simple-GUI](https://github.com/Nurb4000/acestep.cpp-simple-GUI)
 - [aceradio](https://github.com/IMbackK/aceradio)
-
-## Samples
-
-https://github.com/user-attachments/assets/9a50c1f4-9ec0-474a-bd14-e8c6b00622a1
-
-https://github.com/user-attachments/assets/fb606249-0269-4153-b651-bf78e05baf22
-
-https://github.com/user-attachments/assets/e0580468-5e33-4a1f-a0f4-b914e4b9a8c2
-
-https://github.com/user-attachments/assets/292a31f1-f97e-4060-9207-ed8364d9a794
-
-https://github.com/user-attachments/assets/34b1b781-a5bc-46c4-90a6-615a10bc2c6a
 
 ## Acknowledgements
 

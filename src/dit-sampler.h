@@ -154,7 +154,8 @@ static int dit_ggml_generate(DiTGGML *           model,
                              float           repaint_injection_ratio  = 0.5f,
                              int             repaint_crossfade_frames = 0,
                              bool            use_sde                  = false,
-                             const int64_t * seeds                    = nullptr) {
+                             const int64_t * seeds                    = nullptr,
+                             bool            use_batch_cfg            = true) {
     DiTGGMLConfig & c       = model->cfg;
     int             Oc      = c.out_channels;      // 64
     int             ctx_ch  = c.in_channels - Oc;  // 128
@@ -163,7 +164,22 @@ static int dit_ggml_generate(DiTGGML *           model,
     int             n_per   = T * Oc;              // elements per sample
     int             n_total = N * n_per;           // total output elements
 
-    fprintf(stderr, "[DiT] Batch N=%d, T=%d, S=%d, enc_S=%d\n", N, T, S, enc_S);
+    // CFG batching: pack conditional + unconditional into one graph of size 2*N.
+    // Slots [0, N): conditional (real encoder states).
+    // Slots [N, 2*N): unconditional (null encoder states).
+    // Single forward produces both predictions, halving DiT compute per step.
+    // When batch_cfg is false, two separate forwards per step (saves activation memory).
+    bool do_cfg    = (guidance_scale > 1.0f) && model->null_condition_emb;
+    bool batch_cfg = do_cfg && use_batch_cfg;
+    int  N_graph   = batch_cfg ? 2 * N : N;
+
+    if (guidance_scale > 1.0f && !model->null_condition_emb) {
+        fprintf(stderr, "[DiT] WARNING: guidance_scale=%.1f but null_condition_emb not found. Disabling CFG.\n",
+                guidance_scale);
+    }
+
+    fprintf(stderr, "[DiT] Batch N=%d, T=%d, S=%d, enc_S=%d%s\n", N, T, S, enc_S,
+            batch_cfg ? ", CFG batched 2N" : (do_cfg ? ", CFG 2-pass" : ""));
 
     // Graph context (generous fixed allocation, shapes are constant across steps)
     size_t               ctx_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false);
@@ -178,7 +194,7 @@ static int dit_ggml_generate(DiTGGML *           model,
 
     struct ggml_tensor * t_input  = NULL;
     struct ggml_tensor * t_output = NULL;
-    struct ggml_cgraph * gf       = dit_ggml_build_graph(model, ctx, T, enc_S, N, &t_input, &t_output);
+    struct ggml_cgraph * gf       = dit_ggml_build_graph(model, ctx, T, enc_S, N_graph, &t_input, &t_output);
 
     fprintf(stderr, "[DiT] Graph: %d nodes\n", ggml_graph_n_nodes(gf));
 
@@ -208,35 +224,37 @@ static int dit_ggml_generate(DiTGGML *           model,
         return -1;
     }
 
-    // Encoder hidden states: upload once (re-uploaded per step only when CFG swaps to null)
+    // Encoder hidden states: re-uploaded per step (scheduler clobbers input buffers).
+    // When CFG batched, slots [0,N) hold real encoder states, [N,2N) hold null.
     // t_enc was declared above for backend forcing
 
     // t_r is set per-step in the loop (= t_curr, same as Python reference)
     struct ggml_tensor * t_tr = ggml_graph_get_tensor(gf, "t_r");
 
-    // Positions: [0, 1, ..., S-1] repeated N times for batch rope indexing
+    // Positions: [0, 1, ..., S-1] repeated N_graph times for batch rope indexing
     struct ggml_tensor * t_pos = ggml_graph_get_tensor(gf, "positions");
-    std::vector<int32_t> pos_data(S * N);
-    for (int b = 0; b < N; b++) {
+    std::vector<int32_t> pos_data(S * N_graph);
+    for (int b = 0; b < N_graph; b++) {
         for (int i = 0; i < S; i++) {
             pos_data[b * S + i] = i;
         }
     }
-    ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
+    ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
 
     // Self-attention masks: per-batch, combines sliding window and padding.
-    // GGML flash_attn_ext mask layout: [ne0=KV_len, ne1=Q_len, 1, N]
+    // GGML flash_attn_ext mask layout: [ne0=KV_len, ne1=Q_len, 1, N_graph]
     // Linear element offset: ki + qi*ne0 + b*ne0*ne1
-    //   sa_mask_sw  [S, S, 1, N]: layer_type=0 (sliding window + padding)
-    //   sa_mask_pad [S, S, 1, N]: layer_type=1 (full attention, padding only)
+    //   sa_mask_sw  [S, S, 1, N_graph]: layer_type=0 (sliding window + padding)
+    //   sa_mask_pad [S, S, 1, N_graph]: layer_type=1 (full attention, padding only)
     // When real_S is NULL, all positions are real (mask is all 0.0).
     struct ggml_tensor * t_sa_mask_sw  = ggml_graph_get_tensor(gf, "sa_mask_sw");
     struct ggml_tensor * t_sa_mask_pad = ggml_graph_get_tensor(gf, "sa_mask_pad");
 
     int                   win = c.sliding_window;
-    std::vector<uint16_t> sa_sw_data(S * S * N);
-    std::vector<uint16_t> sa_pad_data(S * S * N);
+    std::vector<uint16_t> sa_sw_data(S * S * N_graph);
+    std::vector<uint16_t> sa_pad_data(S * S * N_graph);
 
+    // Fill masks for real samples, then duplicate for uncond slots
     for (int b = 0; b < N; b++) {
         int rs = real_S ? real_S[b] : S;  // real sequence length for this batch element
         for (int qi = 0; qi < S; qi++) {
@@ -255,16 +273,20 @@ static int dit_ggml_generate(DiTGGML *           model,
                 sa_pad_data[off] = ggml_fp32_to_fp16(pad_val);
             }
         }
+        if (batch_cfg) {
+            memcpy(&sa_sw_data[(N + b) * S * S], &sa_sw_data[b * S * S], S * S * sizeof(uint16_t));
+            memcpy(&sa_pad_data[(N + b) * S * S], &sa_pad_data[b * S * S], S * S * sizeof(uint16_t));
+        }
     }
-    ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
-    ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
+    ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+    ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
 
     // Cross-attention mask: per-batch encoder padding.
-    // [ne0=enc_S (KV), ne1=S (Q), 1, N] - blocks null_cond padding in enc_hidden.
+    // [ne0=enc_S (KV), ne1=S (Q), 1, N_graph] blocks padding in enc_hidden.
     // Value depends only on ki (encoder position), independent of qi.
     // Linear offset for element (ki, qi, 0, b) = ki + qi*enc_S + b*enc_S*S
     struct ggml_tensor *  t_ca_mask = ggml_graph_get_tensor(gf, "ca_mask");
-    std::vector<uint16_t> ca_data(enc_S * S * N);
+    std::vector<uint16_t> ca_data(enc_S * S * N_graph);
 
     for (int b = 0; b < N; b++) {
         int re = real_enc_S ? real_enc_S[b] : enc_S;
@@ -275,56 +297,23 @@ static int dit_ggml_generate(DiTGGML *           model,
                 ca_data[b * enc_S * S + qi * enc_S + ki] = ggml_fp32_to_fp16(v);
             }
         }
-    }
-    ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
-
-    // CFG setup
-    bool                           do_cfg = guidance_scale > 1.0f;
-    std::vector<float>             null_enc_buf;
-    std::vector<APGMomentumBuffer> apg_mbufs;
-
-    if (do_cfg) {
-        if (!model->null_condition_emb) {
-            fprintf(stderr, "[DiT] WARNING: guidance_scale=%.1f but null_condition_emb not found. Disabling CFG.\n",
-                    guidance_scale);
-            do_cfg = false;
-        } else {
-            int                emb_n = (int) ggml_nelements(model->null_condition_emb);
-            std::vector<float> null_emb(emb_n);
-
-            if (model->null_condition_emb->type == GGML_TYPE_BF16) {
-                std::vector<uint16_t> bf16_buf(emb_n);
-                ggml_backend_tensor_get(model->null_condition_emb, bf16_buf.data(), 0, emb_n * sizeof(uint16_t));
-                for (int i = 0; i < emb_n; i++) {
-                    uint32_t w = (uint32_t) bf16_buf[i] << 16;
-                    memcpy(&null_emb[i], &w, 4);
-                }
-            } else {
-                ggml_backend_tensor_get(model->null_condition_emb, null_emb.data(), 0, emb_n * sizeof(float));
-            }
-
-            // Broadcast [H_enc] to [enc_S, H_enc] then to N copies [H_enc, enc_S, N]
-            std::vector<float> null_enc_single(H_enc * enc_S);
-            for (int s = 0; s < enc_S; s++) {
-                memcpy(&null_enc_single[s * H_enc], null_emb.data(), H_enc * sizeof(float));
-            }
-            null_enc_buf.resize(H_enc * enc_S * N);
-            for (int b = 0; b < N; b++) {
-                memcpy(null_enc_buf.data() + b * enc_S * H_enc, null_enc_single.data(), enc_S * H_enc * sizeof(float));
-            }
-
-            if (dbg && dbg->enabled) {
-                debug_dump_1d(dbg, "null_condition_emb", null_emb.data(), emb_n);
-                debug_dump_2d(dbg, "null_enc_hidden", null_enc_single.data(), enc_S, H_enc);
-            }
-
-            apg_mbufs.resize(N);
-
-            fprintf(stderr, "[DiT] CFG enabled: guidance_scale=%.1f, 2x forward per step, N=%d\n", guidance_scale, N);
+        if (batch_cfg) {
+            memcpy(&ca_data[(N + b) * enc_S * S], &ca_data[b * enc_S * S], enc_S * S * sizeof(uint16_t));
         }
     }
+    ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
 
-    // Prepare host buffers (all N samples contiguous)
+    // CFG: prepare null encoder states and APG buffers
+    std::vector<APGMomentumBuffer> apg_mbufs;
+    std::vector<float>             null_enc_buf;
+
+    if (do_cfg) {
+        apg_mbufs.resize(N);
+        fprintf(stderr, "[DiT] CFG enabled: guidance_scale=%.1f, %s, N_graph=%d\n", guidance_scale,
+                batch_cfg ? "batched" : "2-pass", N_graph);
+    }
+
+    // Prepare host buffers (all N real samples contiguous)
     std::vector<float> xt(noise, noise + n_total);
     std::vector<float> vt(n_total);
 
@@ -335,17 +324,66 @@ static int dit_ggml_generate(DiTGGML *           model,
         vt_uncond.resize(n_total);
     }
 
-    // input_buf: [in_ch, T, N] - pre-fill context_latents (constant across all steps)
-    std::vector<float> input_buf(in_ch * T * N);
+    // input_buf: [in_ch, T, N_graph]
+    // Pre-fill context_latents for slots [0, N). Uncond slots [N, 2N) are duplicated.
+    // The xt portion (noisy latent) is updated per step in the loop.
+    std::vector<float> input_buf(in_ch * T * N_graph);
     for (int b = 0; b < N; b++) {
         for (int t = 0; t < T; t++) {
             memcpy(&input_buf[b * T * in_ch + t * in_ch], &context_latents[b * T * ctx_ch + t * ctx_ch],
                    ctx_ch * sizeof(float));
         }
+        if (batch_cfg) {
+            memcpy(&input_buf[(N + b) * T * in_ch], &input_buf[b * T * in_ch], T * in_ch * sizeof(float));
+        }
     }
 
-    // enc_hidden: already [H_enc, enc_S, N] from caller (per-batch encoded + padded)
-    std::vector<float> enc_buf(enc_hidden_data, enc_hidden_data + H_enc * enc_S * N);
+    // enc_buf: [H_enc, enc_S, N_graph]
+    // Slots [0, N): real encoder hidden states from caller.
+    // Batched CFG: slots [N, 2N) hold null_condition_emb broadcast to [H_enc, enc_S].
+    // 2-pass CFG: null_enc_buf is a separate buffer uploaded before the uncond forward.
+    std::vector<float> enc_buf(H_enc * enc_S * N_graph);
+    memcpy(enc_buf.data(), enc_hidden_data, H_enc * enc_S * N * sizeof(float));
+    if (do_cfg) {
+        int                emb_n = (int) ggml_nelements(model->null_condition_emb);
+        std::vector<float> null_emb(emb_n);
+
+        if (model->null_condition_emb->type == GGML_TYPE_BF16) {
+            std::vector<uint16_t> bf16_buf(emb_n);
+            ggml_backend_tensor_get(model->null_condition_emb, bf16_buf.data(), 0, emb_n * sizeof(uint16_t));
+            for (int i = 0; i < emb_n; i++) {
+                uint32_t w = (uint32_t) bf16_buf[i] << 16;
+                memcpy(&null_emb[i], &w, 4);
+            }
+        } else {
+            ggml_backend_tensor_get(model->null_condition_emb, null_emb.data(), 0, emb_n * sizeof(float));
+        }
+
+        if (dbg && dbg->enabled) {
+            debug_dump_1d(dbg, "null_condition_emb", null_emb.data(), emb_n);
+        }
+
+        // Broadcast [H_enc] to [H_enc, enc_S] then fill uncond destination
+        std::vector<float> null_enc_single(H_enc * enc_S);
+        for (int s = 0; s < enc_S; s++) {
+            memcpy(&null_enc_single[s * H_enc], null_emb.data(), H_enc * sizeof(float));
+        }
+        if (dbg && dbg->enabled) {
+            debug_dump_2d(dbg, "null_enc_hidden", null_enc_single.data(), enc_S, H_enc);
+        }
+        if (batch_cfg) {
+            // Pack null into graph slots [N, 2N)
+            for (int b = 0; b < N; b++) {
+                memcpy(enc_buf.data() + (N + b) * enc_S * H_enc, null_enc_single.data(), enc_S * H_enc * sizeof(float));
+            }
+        } else {
+            // Separate buffer for 2-pass re-upload
+            null_enc_buf.resize(H_enc * enc_S * N);
+            for (int b = 0; b < N; b++) {
+                memcpy(null_enc_buf.data() + b * enc_S * H_enc, null_enc_single.data(), enc_S * H_enc * sizeof(float));
+            }
+        }
+    }
     ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
 
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
@@ -363,16 +401,23 @@ static int dit_ggml_generate(DiTGGML *           model,
         // Cover mode: at cover_steps, swap context to silence and enc_hidden to text2music
         if (context_switch && cover_steps >= 0 && step >= cover_steps && !switched_cover) {
             switched_cover = true;
+            // Swap context latents for cond slots [0, N)
             for (int b = 0; b < N; b++) {
                 for (int t = 0; t < T; t++) {
                     memcpy(&input_buf[b * T * in_ch + t * in_ch], &context_switch[b * T * ctx_ch + t * ctx_ch],
                            ctx_ch * sizeof(float));
                 }
+                // Batched CFG: uncond slot mirrors cond context
+                if (batch_cfg) {
+                    memcpy(&input_buf[(N + b) * T * in_ch], &input_buf[b * T * in_ch], T * in_ch * sizeof(float));
+                }
             }
-            // swap encoder hidden states to text2music-encoded version
+            // Swap encoder hidden states to text2music-encoded version.
+            // Only cond slots [0, N) are updated; uncond slots [N, 2N) keep null.
             if (enc_switch) {
                 memcpy(enc_buf.data(), enc_switch, H_enc * enc_S * N * sizeof(float));
-                // update cross-attention mask for text2music encoder lengths
+
+                // Update cross-attention mask for text2music encoder lengths
                 if (real_enc_S_switch) {
                     for (int b = 0; b < N; b++) {
                         int re = real_enc_S_switch[b];
@@ -398,20 +443,27 @@ static int dit_ggml_generate(DiTGGML *           model,
 
         // Re-upload constants (scheduler may reuse input buffers as scratch between computes)
         ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
-        ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
-        ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
-        ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
-        ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
+        ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
 
-        // Update xt portion of input: [in_ch, T, N] (context_latents pre-filled)
+        // Update xt portion of input: [in_ch, T, N_graph] (context_latents pre-filled)
+        // Both cond and uncond slots receive the same noisy latent
         for (int b = 0; b < N; b++) {
             for (int t = 0; t < T; t++) {
                 memcpy(&input_buf[b * T * in_ch + t * in_ch + ctx_ch], &xt[b * n_per + t * Oc], Oc * sizeof(float));
             }
+            if (batch_cfg) {
+                for (int t = 0; t < T; t++) {
+                    memcpy(&input_buf[(N + b) * T * in_ch + t * in_ch + ctx_ch], &xt[b * n_per + t * Oc],
+                           Oc * sizeof(float));
+                }
+            }
         }
-        ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N * sizeof(float));
+        ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N_graph * sizeof(float));
 
-        // compute forward pass (conditional)
+        // Conditional forward pass
         ggml_backend_sched_graph_compute(model->sched, gf);
 
         // dump intermediate tensors on step 0 (sample 0 only for batch)
@@ -459,12 +511,30 @@ static int dit_ggml_generate(DiTGGML *           model,
             dump_named(last_layer_name);
         }
 
-        // read velocity output: [Oc, T, N]
-        ggml_backend_tensor_get(t_output, vt.data(), 0, n_total * sizeof(float));
+        // Read velocity output and apply CFG
+        if (batch_cfg) {
+            // Output is [Oc, T, 2N]: first N = conditional, last N = unconditional
+            std::vector<float> full_output(n_per * N_graph);
+            ggml_backend_tensor_get(t_output, full_output.data(), 0, n_per * N_graph * sizeof(float));
+            memcpy(vt_cond.data(), full_output.data(), n_total * sizeof(float));
+            memcpy(vt_uncond.data(), full_output.data() + n_total, n_total * sizeof(float));
 
-        // CFG: unconditional pass + APG per sample
-        if (do_cfg) {
-            memcpy(vt_cond.data(), vt.data(), n_total * sizeof(float));
+            if (dbg && dbg->enabled) {
+                char name[64];
+                snprintf(name, sizeof(name), "dit_step%d_vt_cond", step);
+                debug_dump_2d(dbg, name, vt_cond.data(), T, Oc);
+                snprintf(name, sizeof(name), "dit_step%d_vt_uncond", step);
+                debug_dump_2d(dbg, name, vt_uncond.data(), T, Oc);
+            }
+
+            // APG per sample
+            for (int b = 0; b < N; b++) {
+                apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale, apg_mbufs[b],
+                            vt.data() + b * n_per, Oc, T);
+            }
+        } else if (do_cfg) {
+            // 2-pass: conditional output already computed, read it
+            ggml_backend_tensor_get(t_output, vt_cond.data(), 0, n_total * sizeof(float));
 
             if (dbg && dbg->enabled) {
                 char name[64];
@@ -472,7 +542,7 @@ static int dit_ggml_generate(DiTGGML *           model,
                 debug_dump_2d(dbg, name, vt_cond.data(), T, Oc);
             }
 
-            // Unconditional pass: re-upload all inputs (scheduler clobbers input buffers during compute)
+            // Unconditional pass: re-upload null encoder + all inputs (scheduler clobbers buffers)
             ggml_backend_tensor_set(t_enc, null_enc_buf.data(), 0, H_enc * enc_S * N * sizeof(float));
             ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N * sizeof(float));
             if (t_t) {
@@ -500,6 +570,9 @@ static int dit_ggml_generate(DiTGGML *           model,
                 apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale, apg_mbufs[b],
                             vt.data() + b * n_per, Oc, T);
             }
+        } else {
+            // read velocity output: [Oc, T, N]
+            ggml_backend_tensor_get(t_output, vt.data(), 0, n_total * sizeof(float));
         }
 
         if (dbg && dbg->enabled) {

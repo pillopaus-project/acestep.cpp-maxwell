@@ -177,13 +177,13 @@
 		overflow-y: auto;
 	}
 	.form-panel {
-		width: 400px;
+		width: 500px;
 		flex-shrink: 0;
 	}
 	.songs-panel {
 		flex: 1;
 	}
-	@media (max-width: 800px) {
+	@media (max-width: 700px) {
 		main {
 			flex-direction: column;
 		}

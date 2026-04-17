@@ -23,8 +23,6 @@ https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF/tree/main
 Three LM sizes available: 0.6B (fast), 1.7B, 4B (best quality).
 Multiple DiT variants: turbo (8 steps), sft (50 steps, higher quality), sftturbo50(10 steps), base, shift1, shift3, continuous.
 
-Alternative: `./models.sh` downloads the default set automatically (needs `pip install hf`).
-
 ## Build
 
 ```
@@ -51,7 +49,7 @@ Open http://localhost:8085 in your browser. The WebUI handles everything:
 write a caption, set lyrics and metadata, generate, play, and download tracks.
 
 Models are loaded on first request (zero GPU at startup) and swapped
-automatically when you pick a different one in the UI.
+automatically when you pick a different one in the UI.models get unloaded and reloaded in the workflow to mantain a minimal memory footprint.
 
 ## LoRA
 

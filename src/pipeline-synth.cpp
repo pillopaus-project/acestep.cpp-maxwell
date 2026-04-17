@@ -34,8 +34,8 @@ void ace_synth_default_params(AceSynthParams * p) {
     p->text_encoder_path = NULL;
     p->dit_path          = NULL;
     p->vae_path          = NULL;
-    p->lora_path         = NULL;
-    p->lora_scale        = 1.0f;
+    p->adapter_path      = NULL;
+    p->adapter_scale     = 1.0f;
     p->use_fa            = true;
     p->clamp_fp16        = false;
     p->use_batch_cfg     = true;
@@ -46,8 +46,8 @@ void ace_synth_default_params(AceSynthParams * p) {
 ///////////////////////////////////////// PP START
 const char * dit_path          = NULL;
 const char * text_encoder_path = NULL;
-const char* lora_path = NULL;
-float lora_scale = 1.0f;
+const char* adapter_path = NULL;
+float adapter_scale = 1.0f;
 bool use_fa = true;
 bool clamp_fp16 = false;
 ///////////////////////////////////////// PP END
@@ -81,7 +81,7 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
     fprintf(stderr, "[Synth-Load] Backend init: %.1f ms\n", timer.ms());
 
     timer.reset();
-    if (!dit_ggml_load(&ctx->dit, params->dit_path, params->lora_path, params->lora_scale)) {
+    if (!dit_ggml_load(&ctx->dit, params->dit_path, params->adapter_path, params->adapter_scale)) {
         fprintf(stderr, "[Synth-Load] FATAL: DiT load failed\n");
         delete ctx;
         return NULL;
@@ -212,8 +212,15 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
     dit_path = params->dit_path;
     text_encoder_path = params->text_encoder_path;
     clamp_fp16 = params->clamp_fp16;
-    lora_path = params->lora_path;
-    lora_scale = params->lora_scale;
+    adapter_path = params->adapter_path;
+    adapter_scale = params->adapter_scale;
+    use_fa = params->use_fa;
+
+    dit_path = params->dit_path;
+    text_encoder_path = params->text_encoder_path;
+    clamp_fp16 = params->clamp_fp16;
+    adapter_path = params->adapter_path;
+    adapter_scale = params->adapter_scale;
     use_fa = params->use_fa;
 
     return ctx;
@@ -556,7 +563,7 @@ void ace_dit_reload(AceSynth * ctx) {
         ctx->dit.use_flash_attn = false;
     }
     fprintf(stderr, "[RELOAD] Backend init\n");
-    if (!dit_ggml_load(&ctx->dit, dit_path, lora_path, lora_scale)) {
+    if (!dit_ggml_load(&ctx->dit, dit_path, adapter_path, adapter_scale)) {
         fprintf(stderr, "[RELOAD][Synth][DiT] FATAL: failed to load model\n");
     }
     fprintf(stderr, "[RELOAD] [Synth] DiT weight load: \n");

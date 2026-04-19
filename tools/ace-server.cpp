@@ -34,6 +34,7 @@
 #include "pipeline-synth.h"
 #include "pipeline-understand.h"
 #include "request.h"
+#include "synth-batch-runner.h"
 #include "task-types.h"
 #include "version.h"
 #include "yyjson.h"
@@ -740,19 +741,16 @@ static void synth_worker(std::shared_ptr<Job>    job,
                          bool                    output_wav,
                          WavFormat               wav_fmt,
                          int                     peak_clip) {
-    // expand synth_batch_size and process per-request groups.
-    // each original request = one pipeline call (same codes = same T).
-    // synth_batch_size variations within a group share the same T -> true GPU batch.
-    // different requests can have different T (code length or duration) -> separate calls.
-    // pre-compute total tracks across all groups
-    int batch_n     = (int) ace_reqs.size();
-    int total_alloc = 0;
+    // One group per original request: same codes = same T per group, so the
+    // synth_batch_size copies inside a group stack into a single GPU batch.
+    // Different requests can have different T and become separate groups.
+    const int batch_n     = (int) ace_reqs.size();
+    int       total_alloc = 0;
     for (int ri = 0; ri < batch_n; ri++) {
         int sbs = ace_reqs[ri].synth_batch_size;
         total_alloc += sbs < 1 ? 1 : (sbs > 9 ? 9 : sbs);
     }
     std::vector<AceAudio> audio(total_alloc);
-    int                   audio_idx = 0;
 
     if (job->cancel.load()) {
         free(src_interleaved);
@@ -761,7 +759,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
         return;
     }
 
-    // load
+    // Load resident modules (TextEnc, CondEnc, FSQ). DiT and VAE are phased.
     std::string dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
     if (!ensure_synth(dit_name, sf.adapter, sf.adapter_scale)) {
         free(src_interleaved);
@@ -770,6 +768,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
         return;
     }
 
+    // Build per-request groups with resolved seeds.
+    std::vector<std::vector<AceRequest>> groups(batch_n);
     for (int ri = 0; ri < batch_n; ri++) {
         auto & r   = ace_reqs[ri];
         int    sbs = r.synth_batch_size;
@@ -779,47 +779,36 @@ static void synth_worker(std::shared_ptr<Job>    job,
         if (sbs > 9) {
             sbs = 9;
         }
-
-        // resolve seed once per original request
         request_resolve_seed(&r);
-        long long base_seed = r.seed;
+        const long long base_seed = r.seed;
 
-        // build group: N copies of the same request with consecutive seeds
-        std::vector<AceRequest> group(sbs);
+        groups[ri].resize(sbs);
         for (int i = 0; i < sbs; i++) {
-            group[i]      = r;
-            group[i].seed = base_seed + i;
-        }
-
-        std::vector<AceAudio> group_audio(sbs);
-        int rc = ace_synth_generate(g_ctx_synth, group.data(), src_interleaved, src_len, ref_interleaved, ref_len, sbs,
-                                    group_audio.data(), server_cancel_job, (void *) &job->cancel);
-
-        if (rc != 0) {
-            if (!g_keep_loaded) {
-                ace_synth_free(g_ctx_synth);
-                g_ctx_synth = nullptr;
-                g_loaded_dit.clear();
-                g_loaded_adapter.clear();
-            }
-            free(src_interleaved);
-            free(ref_interleaved);
-            for (int j = 0; j < audio_idx; j++) {
-                ace_audio_free(&audio[j]);
-            }
-            for (int j = 0; j < sbs; j++) {
-                ace_audio_free(&group_audio[j]);
-            }
-            job->status.store(job->cancel.load() ? 3 : 2);
-            return;
-        }
-
-        for (int i = 0; i < sbs; i++) {
-            audio[audio_idx++] = group_audio[i];
+            groups[ri][i]      = r;
+            groups[ri][i].seed = base_seed + i;
         }
     }
 
-    // free pipeline
+    // Two-phase run: DiT resident for all groups, unload, then VAE for all jobs.
+    const int rc = synth_batch_run(g_ctx_synth, groups, src_interleaved, src_len, ref_interleaved, ref_len,
+                                   audio.data(), server_cancel_job, (void *) &job->cancel);
+    if (rc != 0) {
+        if (!g_keep_loaded) {
+            ace_synth_free(g_ctx_synth);
+            g_ctx_synth = nullptr;
+            g_loaded_dit.clear();
+            g_loaded_adapter.clear();
+        }
+        free(src_interleaved);
+        free(ref_interleaved);
+        for (auto & a : audio) {
+            ace_audio_free(&a);
+        }
+        job->status.store(job->cancel.load() ? 3 : 2);
+        return;
+    }
+
+    // Drop the pipeline unless --keep-loaded asks to keep it around.
     if (!g_keep_loaded) {
         ace_synth_free(g_ctx_synth);
         g_ctx_synth = nullptr;
@@ -828,7 +817,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     }
     free(src_interleaved);
     free(ref_interleaved);
-    int total_tracks = audio_idx;
+    const int total_tracks = total_alloc;
 
     // encode each track (peak normalize + encode)
     const char * mime = output_wav ? "audio/wav" : "audio/mpeg";

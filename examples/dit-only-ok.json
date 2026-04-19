@@ -1,0 +1,13 @@
+{
+  "caption": "A Deep House track built on a foundation of a driving four-on kick drum with upbeat hi-hats, funky snare drums and percussions  and analog synth pads chords; the vibe is uplifting and happy ",
+  "lyrics": "[Instrumental]",
+  "bpm": "130",
+  "duration": "0",
+  "keyscale": "C minor",
+  "timesignature": "4",
+  "vocal_language": "en",
+  "inference_steps": 10,
+  "guidance_scale": 1.0,
+  "shift": 3.0,
+  "use_cot_caption": false
+}

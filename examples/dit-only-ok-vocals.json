@@ -1,0 +1,13 @@
+{
+  "caption": "A Deep House track built on a foundation of a driving four-on kick drum with upbeat hi-hats, funky snare drums and percussions  and a female soulful mezzosoprano vocalist; the vibe is uplifting and happy ",
+  "lyrics": "[Intro - Instrumental]\n\n[Verse 1 - Instrumental]\n\n[Chorus]\nIts time for dancing\nLet the music take control\n\nIts time for dancing\nLet the music take control\n\n[Instrumental Break - drums and bassline only]\n\n[Verse 2 - Instrumental]\n\n[Chorus]\nIts time for dancing\nLet the music take control\n\nIts time for dancing\nLet the music take control\n\n[Outro - Instrumental]\n",
+  "bpm": "130",
+  "duration": "0",
+  "keyscale": "C minor",
+  "timesignature": "4",
+  "vocal_language": "en",
+  "inference_steps": 10,
+  "guidance_scale": 1.0,
+  "shift": 3.0,
+  "use_cot_caption": false
+}

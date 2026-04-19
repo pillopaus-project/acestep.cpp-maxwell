@@ -4,6 +4,7 @@
 #include "audio-io.h"
 #include "pipeline-synth.h"
 #include "request.h"
+#include "synth-batch-runner.h"
 #include "task-types.h"
 #include "version.h"
 
@@ -131,6 +132,11 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 1;
     }
+    if (!vae_gguf) {
+        fprintf(stderr, "[CLI] ERROR: --vae required\n");
+        usage(argv[0]);
+        return 1;
+    }
 
     // Load models
     AceSynthParams params;
@@ -156,11 +162,6 @@ int main(int argc, char ** argv) {
     float * src_interleaved = NULL;
     int     src_len         = 0;
     if (src_audio_path) {
-        if (!vae_gguf) {
-            fprintf(stderr, "[Ace-Synth] ERROR: --src-audio requires --vae\n");
-            ace_synth_free(ctx);
-            return 1;
-        }
         int     T_audio = 0;
         float * planar  = audio_read_48k(src_audio_path, &T_audio);
         if (!planar) {
@@ -179,13 +180,6 @@ int main(int argc, char ** argv) {
     float * ref_interleaved = NULL;
     int     ref_len         = 0;
     if (ref_audio_path) {
-        if (!vae_gguf) {
-            fprintf(stderr, "[Ace-Synth] ERROR: --ref-audio requires --vae\n");
-            free(src_interleaved);
-            free(ref_interleaved);
-            ace_synth_free(ctx);
-            return 1;
-        }
         int     T_audio = 0;
         float * planar  = audio_read_48k(ref_audio_path, &T_audio);
         if (!planar) {
@@ -232,60 +226,64 @@ int main(int argc, char ** argv) {
     }
     fprintf(stderr, "[Ace-Synth] Batch: %d request(s)\n", batch_n);
 
-    // process each request as a separate group (same codes = same T per group).
-    // synth_batch_size variations within a group share the same T -> true GPU batch.
-    // different requests can have different T -> separate pipeline calls.
-    std::vector<AceAudio>    all_audio;
-    std::vector<std::string> all_basenames;
-    std::vector<int>         all_synth_indices;
+    // Build one group per original request (same codes = same T per group).
+    // synth_batch_size variations within a group share the same T, so they
+    // stack into a single GPU batch. Different requests can have different
+    // T -> they become separate groups and each gets its own DiT forward.
+    int total_alloc = 0;
+    for (int ri = 0; ri < batch_n; ri++) {
+        int sbs = reqs[ri].synth_batch_size;
+        total_alloc += sbs < 1 ? 1 : (sbs > 9 ? 9 : sbs);
+    }
+    std::vector<AceAudio>                all_audio(total_alloc);
+    std::vector<std::string>             all_basenames(total_alloc);
+    std::vector<int>                     all_synth_indices(total_alloc);
+    std::vector<std::vector<AceRequest>> groups(batch_n);
 
+    int off = 0;
     for (int ri = 0; ri < batch_n; ri++) {
         int sbs = reqs[ri].synth_batch_size;
         if (sbs < 1) {
             sbs = 1;
         }
+        if (sbs > 9) {
+            sbs = 9;
+        }
 
         // resolve seed once per original request
         request_resolve_seed(&reqs[ri]);
-        long long base_seed = reqs[ri].seed;
+        const long long base_seed = reqs[ri].seed;
 
-        // build group: N copies with consecutive seeds
-        std::vector<AceRequest> group(sbs);
+        groups[ri].resize(sbs);
         for (int i = 0; i < sbs; i++) {
-            group[i]      = reqs[ri];
-            group[i].seed = base_seed + i;
+            groups[ri][i]      = reqs[ri];
+            groups[ri][i].seed = base_seed + i;
         }
 
         if (batch_n > 1 || sbs > 1) {
             fprintf(stderr, "[Ace-Synth] Group %d: %d track(s)\n", ri, sbs);
         }
 
-        std::vector<AceAudio> group_audio(sbs);
-        if (ace_synth_generate(ctx, group.data(), src_interleaved, src_len, ref_interleaved, ref_len, sbs,
-                               group_audio.data()) != 0) {
-            fprintf(stderr, "[Ace-Synth] ERROR: generation failed for group %d\n", ri);
-            for (auto & a : all_audio) {
-                ace_audio_free(&a);
-            }
-            for (auto & a : group_audio) {
-                ace_audio_free(&a);
-            }
-            free(src_interleaved);
-            free(ref_interleaved);
-            ace_synth_free(ctx);
-            return 1;
-        }
-
         for (int i = 0; i < sbs; i++) {
-            all_audio.push_back(group_audio[i]);
-            all_basenames.push_back(basenames[ri]);
-            all_synth_indices.push_back(i);
+            all_basenames[off + i]     = basenames[ri];
+            all_synth_indices[off + i] = i;
         }
+        off += sbs;
     }
-//////////////////////  PP START 
-    free(src_interleaved);
-    free(ref_interleaved);
-/////////////////////  PP END
+
+    // Two-phase run: DiT resident for all groups, then VAE for all jobs.
+    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, ref_interleaved, ref_len, all_audio.data());
+    if (rc != 0) {
+        fprintf(stderr, "[Ace-Synth] ERROR: batch run failed\n");
+        for (auto & a : all_audio) {
+            ace_audio_free(&a);
+        }
+        free(src_interleaved);
+        free(ref_interleaved);
+        ace_synth_free(ctx);
+        return 1;
+    }
+
     // Write output files
     for (int b = 0; b < (int) all_audio.size(); b++) {
         if (!all_audio[b].samples) {
@@ -300,8 +298,8 @@ int main(int argc, char ** argv) {
         ace_audio_free(&all_audio[b]);
     }
 
-    // free(src_interleaved);
-    // free(ref_interleaved);
+    free(src_interleaved);
+    free(ref_interleaved);
     ace_synth_free(ctx);
     fprintf(stderr, "[Ace-Synth] All done\n");
     return 0;

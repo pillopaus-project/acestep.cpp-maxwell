@@ -161,17 +161,17 @@ static struct ggml_tensor * dit_load_proj_in_w(WeightCtx *         wctx,
     struct ggml_tensor * dst = ggml_new_tensor_2d(wctx->ctx, GGML_TYPE_F32, in_ch * P, H);
     ggml_set_name(dst, name.c_str());
 
-    size_t n = (size_t) in_ch * P * H;
-    wctx->staging.emplace_back(n);
-    auto & buf = wctx->staging.back();
+    size_t  n    = (size_t) in_ch * P * H;
+    auto    buf  = std::make_unique<float[]>(n);
+    float * data = buf.get();
 
     // src ggml [P, in_ch, H]: elem(p, ic, h) = raw[h*P*in_ch + ic*P + p]
-    // dst ggml [in_ch*P, H]:  elem(j, h)     = buf[h*in_ch*P + j]  where j = p*in_ch + ic
+    // dst ggml [in_ch*P, H]:  elem(j, h)     = data[h*in_ch*P + j]  where j = p*in_ch + ic
     auto cvt = [&](auto read_fn) {
         for (int h = 0; h < H; h++) {
             for (int ic = 0; ic < in_ch; ic++) {
                 for (int p = 0; p < P; p++) {
-                    buf[h * in_ch * P + p * in_ch + ic] = read_fn(h * P * in_ch + ic * P + p);
+                    data[h * in_ch * P + p * in_ch + ic] = read_fn(h * P * in_ch + ic * P + p);
                 }
             }
         }
@@ -189,7 +189,8 @@ static struct ggml_tensor * dit_load_proj_in_w(WeightCtx *         wctx,
         fprintf(stderr, "[GGUF] FATAL: unsupported type %d for '%s' in proj_in pre-permute\n", src->type, name.c_str());
         exit(1);
     }
-    wctx->pending.push_back({ dst, buf.data(), n * sizeof(float), 0 });
+    wctx->pending.push_back({ dst, data, n * sizeof(float), 0 });
+    wctx->staging.push_back(std::move(buf));
     return dst;
 }
 
@@ -217,17 +218,17 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
     struct ggml_tensor * dst = ggml_new_tensor_2d(wctx->ctx, GGML_TYPE_F32, H, out_ch * P);
     ggml_set_name(dst, name.c_str());
 
-    size_t n = (size_t) out_ch * P * H;
-    wctx->staging.emplace_back(n);
-    auto & buf = wctx->staging.back();
+    size_t  n    = (size_t) out_ch * P * H;
+    auto    buf  = std::make_unique<float[]>(n);
+    float * data = buf.get();
 
     // src ggml [P, out_ch, H]: elem(p, oc, h) = raw[h*P*out_ch + oc*P + p]
-    // dst ggml [H, out_ch*P]:  elem(h, j)     = buf[j*H + h]  where j = p*out_ch + oc
+    // dst ggml [H, out_ch*P]:  elem(h, j)     = data[j*H + h]  where j = p*out_ch + oc
     auto cvt = [&](auto read_fn) {
         for (int h = 0; h < H; h++) {
             for (int oc = 0; oc < out_ch; oc++) {
                 for (int p = 0; p < P; p++) {
-                    buf[(p * out_ch + oc) * H + h] = read_fn(h * P * out_ch + oc * P + p);
+                    data[(p * out_ch + oc) * H + h] = read_fn(h * P * out_ch + oc * P + p);
                 }
             }
         }
@@ -246,7 +247,8 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
                 name.c_str());
         exit(1);
     }
-    wctx->pending.push_back({ dst, buf.data(), n * sizeof(float), 0 });
+    wctx->pending.push_back({ dst, data, n * sizeof(float), 0 });
+    wctx->staging.push_back(std::move(buf));
     return dst;
 }
 
@@ -448,4 +450,37 @@ static void dit_ggml_free(DiTGGML * m) {
     backend_release(m->backend, m->cpu_backend);
     wctx_free(&m->wctx);
     *m = {};
+}
+
+// Read DiT config from GGUF metadata without loading any tensor weights.
+// Used by the orchestrator to keep patch_size, in_channels, out_channels
+// accessible during text encoding while the DiT itself is not yet loaded.
+// Returns true on success, false on I/O or missing key.
+static bool dit_ggml_load_config(DiTGGMLConfig * cfg, const char * gguf_path) {
+    GGUFModel gf;
+    if (!gf_load(&gf, gguf_path)) {
+        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
+        return false;
+    }
+    cfg->n_layers          = (int) gf_get_u32(gf, "acestep-dit.block_count");
+    cfg->hidden_size       = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
+    cfg->intermediate_size = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
+    cfg->n_heads           = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
+    cfg->n_kv_heads        = (int) gf_get_u32(gf, "acestep-dit.attention.head_count_kv");
+    cfg->head_dim          = (int) gf_get_u32(gf, "acestep-dit.attention.key_length");
+    cfg->in_channels       = (int) gf_get_u32(gf, "acestep.in_channels");
+    cfg->out_channels      = (int) gf_get_u32(gf, "acestep.audio_acoustic_hidden_dim");
+    cfg->patch_size        = (int) gf_get_u32(gf, "acestep.patch_size");
+    cfg->sliding_window    = (int) gf_get_u32(gf, "acestep.sliding_window");
+    cfg->rope_theta        = gf_get_f32(gf, "acestep-dit.rope.freq_base");
+    cfg->rms_norm_eps      = gf_get_f32(gf, "acestep-dit.attention.layer_norm_rms_epsilon");
+    gf_close(&gf);
+
+    if (!cfg->n_layers || !cfg->hidden_size || !cfg->intermediate_size || !cfg->n_heads || !cfg->n_kv_heads ||
+        !cfg->head_dim || !cfg->in_channels || !cfg->out_channels || !cfg->patch_size || !cfg->sliding_window ||
+        cfg->rope_theta <= 0.0f || cfg->rms_norm_eps <= 0.0f) {
+        fprintf(stderr, "[Load] FATAL: incomplete DiT config in %s\n", gguf_path);
+        return false;
+    }
+    return true;
 }
